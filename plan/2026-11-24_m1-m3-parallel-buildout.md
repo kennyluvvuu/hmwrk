@@ -71,7 +71,7 @@
 
 **T2 · Конфиг** — S
 - Вход: SPEC разд. 7 (модели per-config), 8 (config/), 9.
-- Сделать: `src/config/env.ts` (zod-схема env: PORT, DATA_DIR, GROQ_API_KEY, MISTRAL_API_KEY, TELEGRAM_BOT_TOKEN, PARENT_API_KEY, CHILD_API_KEY, LOG_LEVEL; `.env` загрузка), `src/config/models.ts` (загрузчик `models.json` — слоты read/verify/chat: provider+model id + валидация), `src/config/index.ts` (агрегация), `src/config/logger.ts` (простой leveled logger, без новых зависимостей). Заготовку `models.example.json` — дефолты из спеки (groq vision + mistral deepseek) с комментарием, что id могут поменяться.
+- Сделать: `src/config/env.ts` (zod-схема env: PORT, DATA_DIR, GROQ_API_KEY, MISTRAL_API_KEY, TELEGRAM_BOT_TOKEN, HMWRK_PARENT_KEY, HMWRK_CHILD_KEY, LOG_LEVEL; `.env` загрузка), `src/config/models.ts` (загрузчик `models.json` — слоты read/verify/chat: provider+model id + валидация), `src/config/index.ts` (агрегация), `src/config/logger.ts` (простой leveled logger, без новых зависимостей). Заготовку `models.example.json` — дефолты из спеки (groq vision + mistral deepseek) с комментарием, что id могут поменяться.
 - Тесты: env с отсутствующими необязательными переменными; валидный/невалидный models.json.
 - Файлы-владения: `src/config/**`, `models.example.json`.
 - Готовность: typecheck+test зелёные.
