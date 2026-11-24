@@ -241,13 +241,17 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     const attachments =
       photoIntake === undefined || mapped.images === 0
         ? { ids: [] as string[], problems: [] as string[] }
-        : await attachMessagePhotos(lastUserContent(request.messages) ?? "", { sink: photoIntake });
+        : await attachMessagePhotos(lastUserContent(request.messages) ?? "", {
+            sink: photoIntake,
+            // SPEC §5.3: a parent's screenshot is intake material, a child's photo is a check-in.
+            role: actor.role,
+          });
     for (const problem of attachments.problems) logger?.warn("dropped an attached image", { problem });
 
     const text =
       attachments.ids.length === 0
         ? mapped.text
-        : `${mapped.text}\n\n${photoAttachmentBlock(attachments.ids)}`;
+        : `${mapped.text}\n\n${photoAttachmentBlock(attachments.ids, actor.role)}`;
 
     if (text.trim() === "") {
       return c.json(

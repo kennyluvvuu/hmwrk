@@ -152,10 +152,17 @@ export async function createHmwrkApp(options: CreateHmwrkAppOptions): Promise<Hm
   const spawnVerify = createVerifySpawner(core);
 
   // A2 → A1: the nine tools through the agent's own seam; the role comes from `core.actors`.
+  // P1: `parse_screenshot` reads photos with V2's vision client through D2's photo file store.
   const now = options.now;
   const tools = createHmwrkTools(
     { repos: domain.repos, spawnVerify, now: () => (now ?? (() => new Date()))() },
     core.actors,
+    {
+      intake: {
+        readImages: (input) => llm.readImages(input),
+        photoFiles: { read: (photo) => domain.photoFiles.read(photo) },
+      },
+    },
   );
 
   const extensions = buildAgentExtensions({

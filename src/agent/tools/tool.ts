@@ -34,6 +34,7 @@ import { parseToolArgs, toolArgsSchema } from "../../domain/schemas.js";
 import { isToolAllowed } from "../../domain/types.js";
 import type { Repos, ToolArgs, ToolName } from "../../domain/index.js";
 import { ROLE_TITLE_RU } from "./format.js";
+import type { ScreenshotIntake } from "./screenshot-draft.js";
 
 /** Everything a toolset needs, assembled by {@link import("./index.js").createHmwrkTools}. */
 export interface ToolEnvironment {
@@ -42,6 +43,12 @@ export interface ToolEnvironment {
   readonly now: () => Date;
   /** K3: conversation → person. The only source of the role; tool arguments never carry it. */
   readonly actors: ActorDirectory;
+  /**
+   * Vision reader + photo file store of `parse_screenshot` (P1). Optional on purpose: the toolset
+   * also runs in contexts that do not wire V2/D2 (tool tests), and the tool then says the intake
+   * half is not connected instead of failing in an unclear way.
+   */
+  readonly intake?: ScreenshotIntake;
 }
 
 /** One call, already authorised: who calls, against which data, at which instant. */
@@ -51,6 +58,8 @@ export interface ToolRun {
   readonly spawnVerify: VerifySpawner;
   /** Clock read once per call, so one result is internally consistent. */
   readonly now: Date;
+  /** See {@link ToolEnvironment.intake}. */
+  readonly intake?: ScreenshotIntake;
 }
 
 /**
@@ -143,7 +152,13 @@ async function runDomainTool<N extends ToolName>(
     return errorResult(argumentRefusal(tool, error));
   }
 
-  const run: ToolRun = { actor, repos: env.repos, spawnVerify: env.spawnVerify, now: env.now() };
+  const run: ToolRun = {
+    actor,
+    repos: env.repos,
+    spawnVerify: env.spawnVerify,
+    now: env.now(),
+    ...(env.intake === undefined ? {} : { intake: env.intake }),
+  };
   try {
     return textResult(await tool.run(run, args));
   } catch (error) {

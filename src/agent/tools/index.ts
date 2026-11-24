@@ -35,6 +35,16 @@ import { getSettingsTool } from "./getSettings.js";
 import { setSettingTool } from "./setSetting.js";
 import { createToolRegistration } from "./tool.js";
 import type { ToolEnvironment } from "./tool.js";
+import type { ScreenshotIntake } from "./screenshot-draft.js";
+
+/** Optional half of the toolset: the parts that are not domain repositories (P1's intake). */
+export interface HmwrkToolOptions {
+  /**
+   * Vision reader + photo file store used by `parse_screenshot` (SPEC §5.3). Boot passes V2's
+   * `readImages` and D2's `PhotoFiles`; without it the tool reports that intake is not connected.
+   */
+  readonly intake?: ScreenshotIntake;
+}
 
 /**
  * SPEC §5.5 tools for one household.
@@ -43,12 +53,17 @@ import type { ToolEnvironment } from "./tool.js";
  * answer. Passing `deps.repos` and `deps.spawnVerify` straight through keeps the tools free of
  * durable-task knowledge: they only know that `startVerify({ checkInId })` exists.
  */
-export function createHmwrkTools(deps: ToolDeps, actors: ActorDirectory): AgentToolset {
+export function createHmwrkTools(
+  deps: ToolDeps,
+  actors: ActorDirectory,
+  options: HmwrkToolOptions = {},
+): AgentToolset {
   const env: ToolEnvironment = {
     repos: deps.repos,
     spawnVerify: deps.spawnVerify,
     now: deps.now,
     actors,
+    ...(options.intake === undefined ? {} : { intake: options.intake }),
   };
 
   // `Record<ToolName, …>` rather than `Partial<…>`: the compiler then refuses a toolset that lost
