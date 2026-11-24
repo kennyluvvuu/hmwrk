@@ -36,7 +36,7 @@ export const AGENT_EXTENSION_NAME = "hmwrk";
  * Key of A1's system-prompt section inside the `hmwrk` extension. `wrapSection()` (M2) targets
  * sections by this key, so it is part of the contract rather than a local constant.
  */
-export const AGENT_SECTION_KEY = "hmwrk.role-and-date";
+export const AGENT_SECTION_KEY = "hmwrk-role-and-date";
 
 /**
  * The single tool list of SPEC §5.5, in the order the prompt should present it. M2 implements
