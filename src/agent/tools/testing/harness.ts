@@ -33,6 +33,7 @@ import type {
   FindingVerdict,
   Photo,
   Repos,
+  SettingKey,
   Settings,
   ToolName,
   VerificationWithFindings,
@@ -78,6 +79,8 @@ export interface ToolHarnessOptions {
   readonly visionAnswer?: string | ((input: ReadImagesInput) => string | Promise<string>);
   /** A real read client (e.g. `createLlmClients` over a faux provider); wins over `visionAnswer`. */
   readonly readImages?: ScreenshotIntake["readImages"];
+  /** I3: `set_setting`'s schedule hook (boot passes the notify scheduler's `reschedule`). */
+  readonly onScheduleSettingsChanged?: (key: SettingKey) => void | Promise<void>;
 }
 
 export interface ToolHarness {
@@ -93,6 +96,8 @@ export interface ToolHarness {
   seedScreenshot(bytes?: Uint8Array): Promise<Photo>;
   /** Invoke a tool exactly as `execute(args, api, context)` does. */
   call(name: ToolName, conversation: ConversationId, args: unknown): Promise<ToolExecutionResult>;
+  /** Setting keys the `set_setting` schedule hook was called with, in order (I3). */
+  readonly scheduleCalls: readonly SettingKey[];
 }
 
 /** Bytes the fake store answers with when a screenshot was seeded without explicit ones. */
@@ -137,12 +142,25 @@ export function createToolHarness(options: ToolHarnessOptions = {}): ToolHarness
           },
         };
 
-  const tools = createHmwrkTools(deps, actors, intake === undefined ? {} : { intake });
+  const scheduleCalls: SettingKey[] = [];
+  const hook =
+    options.onScheduleSettingsChanged === undefined
+      ? undefined
+      : async (key: SettingKey): Promise<void> => {
+          scheduleCalls.push(key);
+          await options.onScheduleSettingsChanged?.(key);
+        };
+
+  const tools = createHmwrkTools(deps, actors, {
+    ...(intake === undefined ? {} : { intake }),
+    ...(hook === undefined ? {} : { onScheduleSettingsChanged: hook }),
+  });
 
   return {
     repos,
     tools,
     verifyCalls,
+    scheduleCalls,
     readCalls,
     now,
     setNow(value) {

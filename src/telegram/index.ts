@@ -8,4 +8,5 @@
 export * from "./bind.js";
 export * from "./bindings.js";
 export * from "./client.js";
+export * from "./notify-renderers.js";
 export * from "./templates.js";

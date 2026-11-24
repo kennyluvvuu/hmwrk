@@ -7,8 +7,10 @@
  * general «к пятнице» stays the agent's job, not this tool's.
  *
  * The tool answers with the old → new pair, so the model can confirm the change the way a person
- * checks it, and says when a schedule change takes effect: the reminder/digest tasks read the
- * settings at each planning step (N1), so nothing is restarted here.
+ * checks it. For a broadcast time it then calls {@link ToolRun.onScheduleSettingsChanged} (I3): the
+ * reminder/digest tasks sleep until their next window, so without that hook a new `reminder_time`
+ * would only be read tomorrow. The hook asks the notify scheduler to end both tasks and recreate them,
+ * and the answer says which of the two actually happened.
  *
  * Invalid values never reach the store: the message names the key and its accepted shape in
  * Russian instead of relaying a zod path.
@@ -19,7 +21,7 @@ import { formatDefaultDue } from "../../domain/settings.js";
 import type { DefaultDue, IsoDate, SettingKey, Settings, TimeOfDay } from "../../domain/types.js";
 import { DomainError } from "../../domain/errors.js";
 import { formatDay } from "./format.js";
-import { defineDomainTool, ToolRefusal } from "./tool.js";
+import { defineDomainTool, ToolRefusal, type ToolRun } from "./tool.js";
 
 /** Accepted shape of each key, in the words a parent would need to fix a mistake. */
 const SETTING_HINT: Record<SettingKey, string> = {
@@ -28,6 +30,22 @@ const SETTING_HINT: Record<SettingKey, string> = {
   default_due: 'правило дедлайна: {"offset_days":1,"time":"20:00"} или строка «20:00 след. дня», «завтра 20:00»',
   paused_until: "дата, до которой рассылки молчат, в формате ГГГГ-ММ-ДД, или null, чтобы снять паузу",
 };
+
+/**
+ * I3: apply a broadcast-time change to the running schedule. `false` means «the next cycle reads
+ * it» — a boot without the notify subsystem, or a reschedule that failed. A failed reschedule is not
+ * a failed setting: the value is stored, so the worst case is the pre-I3 timing.
+ */
+async function reschedule(run: ToolRun, key: SettingKey): Promise<boolean> {
+  if (key !== "reminder_time" && key !== "digest_time") return false;
+  if (run.onScheduleSettingsChanged === undefined) return false;
+  try {
+    await run.onScheduleSettingsChanged(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** Human rendering of one stored value — used for both sides of the «было → стало» answer. */
 function describeValue(key: SettingKey, value: Settings[SettingKey]): string {
@@ -66,16 +84,25 @@ export const setSettingTool = defineDomainTool({
     }
 
     await run.repos.settings.set(args.key, value);
+    const applied = await reschedule(run, args.key);
     const lines = [
       `Настройка ${args.key} изменена: ${describeValue(args.key, before)} → ${describeValue(args.key, value)}.`,
     ];
 
     switch (args.key) {
       case "reminder_time":
-        lines.push("Новое время применится к следующим напоминаниям ребёнку.");
+        lines.push(
+          applied
+            ? "Расписание напоминаний пересобрано: ближайшее сработает уже в новое время."
+            : "Новое время применится к следующим напоминаниям ребёнку.",
+        );
         break;
       case "digest_time":
-        lines.push("Новое время применится к следующему дайджесту.");
+        lines.push(
+          applied
+            ? "Расписание дайджеста пересобрано: ближайший дайджест уйдёт уже в новое время."
+            : "Новое время применится к следующему дайджесту.",
+        );
         break;
       case "default_due":
         lines.push("Дедлайн по умолчанию используется, когда родитель не назвал дату.");

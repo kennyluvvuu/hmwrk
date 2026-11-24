@@ -19,7 +19,10 @@
  *    which boot provides over `AssignmentsRepo`;
  * 7. **roles** (ADR 0004) — `hybrid`: OpenWebUI headers + the `users` row first, static keys as the
  *    fallback for a caller that sends no user context;
- * 8. **turn runner** — the real agent (generation) or, with `HMWRK_ECHO=1`, the M1 echo.
+ * 8. **turn runner** — the real agent (generation) or, with `HMWRK_ECHO=1`, the M1 echo;
+ * 9. **notifications** (I3) — the Telegram sender (skipped without a token), N1's reminder/digest
+ *    tasks and their idempotent scheduling. `set_setting` of a broadcast time calls
+ *    {@link NotifyScheduler.reschedule}, so a new time applies to the nearest window, not tomorrow's.
  *
  * The faux-LLM hook (`HMWRK_FAUX_LLM=1`, see `src/faux.ts`) swaps steps 3–4 to scripted models and
  * is the only reason `llm` is injectable: tests pass their own `Models` the same way.
@@ -27,6 +30,12 @@
 
 import { mkdirSync } from "node:fs";
 import { buildModels, installExtensions } from "./durable/index.js";
+import {
+  createNotifyExtension,
+  createNotifyScheduler,
+  type NotifyScheduler,
+  type NotifyScheduledTasks,
+} from "./durable/tasks/notify.js";
 import { createVerifyExtension, createVerifySpawner } from "./durable/tasks/verify.js";
 import type { Models } from "@earendil-works/pi-ai";
 import { buildAgentExtensions } from "./agent/index.js";
@@ -37,13 +46,15 @@ import { createLogger } from "./config/index.js";
 import type { Core, OpenHarnessOptions } from "./contracts/harness.js";
 import { openHarness } from "./contracts/harness.js";
 import type { AssignmentSummaryProvider, RoleResolver } from "./contracts/index.js";
+import type { TelegramSender } from "./contracts/notify.js";
 import type { Repos } from "./domain/index.js";
 import { createFauxLlm } from "./faux.js";
 import { createLlmClients, type LlmClients } from "./llm/index.js";
-import { createRoleResolver } from "./server/auth.js";
+import { STATIC_ACTOR_IDS, createRoleResolver } from "./server/auth.js";
 import { createApp, echoTurnRunner } from "./server/routes.js";
 import { generationTurnRunner } from "./server/turn.js";
 import { openDomain, type Domain } from "./store/index.js";
+import { createNotifyRenderers, createTelegramClient } from "./telegram/index.js";
 
 /** A model collection plus the slot refs that resolve into it. */
 export interface LlmSetup {
@@ -66,6 +77,12 @@ export interface CreateHmwrkAppOptions {
   readonly now?: () => Date;
 }
 
+/** The notification half of boot: absent when no bot token is configured. */
+export interface NotifyWiring {
+  readonly scheduler: NotifyScheduler;
+  readonly tasks: NotifyScheduledTasks;
+}
+
 /** Everything boot produced, exposed for `src/index.ts` and for integration tests. */
 export interface HmwrkApp {
   readonly app: HmwrkHonoApp;
@@ -75,6 +92,8 @@ export interface HmwrkApp {
   readonly config: Config;
   readonly resolver: RoleResolver;
   readonly llm: LlmClients;
+  /** I3: reminder/digest tasks; `null` when `TELEGRAM_BOT_TOKEN` is unset (no sender, no tasks). */
+  readonly notify: NotifyWiring | null;
   /** Closes the core (tasks settle, storage closes). The HTTP server is the caller's. */
   close(): Promise<void>;
 }
@@ -133,6 +152,11 @@ export async function createHmwrkApp(options: CreateHmwrkAppOptions): Promise<Hm
     applied: migrated.applied.map((migration) => migration.name),
   });
 
+  // I3: the static keys *are* the role assignment (ADR 0004), so their owners must exist in `users`:
+  // `bind-telegram` binds a chat to a `users` row and the broadcasts resolve recipients through
+  // `users.listByRole`. Idempotent, and it also makes the bind script work on a fresh DATA_DIR.
+  await ensureStaticUsers(domain.repos);
+
   // V2: the three clients over the same Models collection the harness holds.
   const llm = createLlmClients({
     models: llmSetup.models,
@@ -151,6 +175,32 @@ export async function createHmwrkApp(options: CreateHmwrkAppOptions): Promise<Hm
   ]);
   const spawnVerify = createVerifySpawner(core);
 
+  // I3: notifications. The sender first (no token → no sender), then N1's tasks with G1T's renderers.
+  // Without a token there is nothing to send with, so the tasks are not installed at all: the miss is
+  // explained once at boot instead of every evening in a task log.
+  const sender = createTelegramSender(config, logger);
+  if (sender === null) {
+    // Info, not warn: a key-less smoke run (M1/M2 scripts, a local trial) is a normal configuration.
+    logger.info("TELEGRAM_BOT_TOKEN is unset: reminder and digest are not scheduled", {
+      hint: "docs/telegram-setup.md",
+    });
+  } else {
+    installExtensions(core, [
+      createNotifyExtension({
+        sender,
+        repos: domain.repos,
+        ...createNotifyRenderers(),
+        logger: logger.child({ module: "notify" }),
+      }),
+    ]);
+    logger.info("notify extension installed", {
+      extension: "hmwrk-notify",
+      tasks: ["hmwrk.reminder", "hmwrk.digest"],
+    });
+  }
+  const notifyScheduler =
+    sender === null ? null : createNotifyScheduler(core, { logger: logger.child({ module: "notify" }) });
+
   // A2 → A1: the nine tools through the agent's own seam; the role comes from `core.actors`.
   // P1: `parse_screenshot` reads photos with V2's vision client through D2's photo file store.
   const now = options.now;
@@ -162,6 +212,10 @@ export async function createHmwrkApp(options: CreateHmwrkAppOptions): Promise<Hm
         readImages: (input) => llm.readImages(input),
         photoFiles: { read: (photo) => domain.photoFiles.read(photo) },
       },
+      // I3: a changed broadcast time applies to the nearest window, not tomorrow's.
+      ...(notifyScheduler === null
+        ? {}
+        : { onScheduleSettingsChanged: () => notifyScheduler.reschedule().then(() => undefined) }),
     },
   );
 
@@ -207,6 +261,16 @@ export async function createHmwrkApp(options: CreateHmwrkAppOptions): Promise<Hm
   // Already wired: recovered tasks can start as soon as the scheduler runs.
   await core.resume();
 
+  // I3: the reminder/digest tasks are eternal sleeping records, so `ensureScheduled()` is the whole
+  // restart story — a second task is created only when no live one of that kind exists (the scan runs
+  // after `resume()`, so a task recovered from the previous boot is found, not duplicated).
+  let notify: NotifyWiring | null = null;
+  if (notifyScheduler !== null) {
+    const tasks = await notifyScheduler.ensureScheduled();
+    notify = { scheduler: notifyScheduler, tasks };
+    logger.info("notify tasks scheduled", { ...tasks });
+  }
+
   return {
     app,
     core,
@@ -214,8 +278,32 @@ export async function createHmwrkApp(options: CreateHmwrkAppOptions): Promise<Hm
     config,
     resolver,
     llm,
+    notify,
     close: () => core.close(),
   };
+}
+
+/**
+ * I3: the two `users` rows the static keys own. `openwebui_user_id` is the synthetic key id
+ * ({@link STATIC_ACTOR_IDS}), which keeps them apart from accounts that log in through OpenWebUI.
+ */
+async function ensureStaticUsers(repos: Repos): Promise<void> {
+  await repos.users.upsert({ openwebui_user_id: STATIC_ACTOR_IDS.parent, role: "parent", name: "Родитель" });
+  await repos.users.upsert({ openwebui_user_id: STATIC_ACTOR_IDS.child, role: "child", name: "Ребёнок" });
+}
+
+/**
+ * I3: the Telegram sender of the one bot, or `null` when `TELEGRAM_BOT_TOKEN` is unset.
+ * `TELEGRAM_API_URL` (e2e: a local mock) reaches the client through `config.telegramApiUrl`.
+ */
+function createTelegramSender(config: Config, logger: Logger): TelegramSender | null {
+  const token = config.secrets.telegramBotToken;
+  if (token === undefined) return null;
+  return createTelegramClient({
+    token,
+    ...(config.telegramApiUrl === undefined ? {} : { apiBaseUrl: config.telegramApiUrl }),
+    logger: logger.child({ module: "telegram" }),
+  });
 }
 
 /**

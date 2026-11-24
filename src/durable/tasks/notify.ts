@@ -12,9 +12,10 @@
  * Consequences of that shape (K9):
  * - the task never ends, so it survives restarts as a sleeping record and needs no cron: boot calls
  *   `createNotifyScheduler(core).ensureScheduled()` + `resume()`;
- * - a settings change needs no task surgery: the next `schedule` phase reads the values again, so a
- *   new `reminder_time` takes effect after the next firing (I3 may additionally abort/recreate the
- *   task to apply it immediately — see the N1 report);
+ * - a sleeping task cannot see a settings change, so a new `reminder_time` would only apply after the
+ *   next firing. I3's {@link NotifyScheduler.reschedule} closes that gap: `set_setting` ends both live
+ *   tasks and `ensureScheduled()` recreates them, and the fresh `schedule` phase reads the new values;
+ * - `paused_until` needs no surgery at all: it is read in `fire`, so it mutes the very next firing;
  * - a firing must never fail the task: a missing binding, an empty message and a Telegram error are
  *   all `skipped` results, because the next chance is tomorrow's scheduled firing, not a retry;
  * - the last firing's {@link NotifyFireResult} is kept in the checkpoint, so the state of the task
@@ -42,7 +43,6 @@ import { createLogger } from "../../config/index.js";
 import type { Core } from "../../contracts/harness.js";
 import type { TelegramSender } from "../../contracts/notify.js";
 import {
-  DAY_MS,
   addLocalDays,
   atLocalTime,
   isPaused,
@@ -155,7 +155,7 @@ export interface DigestSections {
   readonly parserDrafts: readonly Assignment[];
 }
 
-/** Renders the child reminder from the assignments due in the next 24 h without a check-in. */
+/** Renders the child reminder from the assignments due in the reminder window without a check-in. */
 export type ReminderRenderer = (assignments: readonly AssignmentWithItems[]) => string;
 
 /** Renders the parent digest from its sections. */
@@ -198,6 +198,18 @@ export function nextRunAt(time: TimeOfDay, now: Date): Date {
   return today.getTime() > now.getTime() ? today : atLocalTime(addLocalDays(now, 1), time);
 }
 
+/**
+ * Exclusive end of the reminder window: local midnight after the **next** calendar day.
+ *
+ * SPEC §5.6 phrases the reminder as «завтра сдать», and the default deadline is tomorrow 20:00, so an
+ * assignment due tomorrow must already be in *tonight's* reminder. The N1 `now + 24h` horizon broke
+ * exactly that case (an evening reminder never saw tomorrow evening), and the W7 verdict replaced it
+ * with «the rest of tomorrow»: the predicate is `now <= due_at < startOfLocalDay(now, +2 days)`.
+ */
+export function reminderHorizon(now: Date): Date {
+  return startOfLocalDay(addLocalDays(now, 2));
+}
+
 /** Per-kind pieces the shared state machine uses. */
 interface NotifyKindSpec {
   readonly kind: NotifyKind;
@@ -214,9 +226,9 @@ interface NotifyMessage {
   readonly entries: number;
 }
 
-/** Reminder: active assignments due in the next 24 h that nobody has reported yet (SPEC §5.6). */
+/** Reminder: active assignments due before the end of tomorrow that nobody has reported yet (SPEC §5.6). */
 async function collectReminder(deps: NotifyDeps, now: Date): Promise<NotifyMessage | null> {
-  const horizon = new Date(now.getTime() + DAY_MS);
+  const horizon = reminderHorizon(now);
   const assignments = await deps.repos.assignments.listWithItems({
     status: "active",
     hasCheckIn: false,
@@ -466,6 +478,7 @@ async function recipientChats(repos: Repos, role: Role): Promise<string[]> {
 export interface NotifySchedulerOptions {
   /** Invocation context; default `BACKGROUND_CONTEXT`. */
   context?: Context;
+  logger?: Logger;
 }
 
 /** Ids of the two scheduled tasks (stable across restarts while they stay alive). */
@@ -482,11 +495,28 @@ export interface NotifyScheduledTasks {
  */
 export interface NotifyScheduler {
   ensureScheduled(): Promise<NotifyScheduledTasks>;
+  /**
+   * Apply a settings change now: end both live tasks and recreate them, which re-reads
+   * `reminder_time` / `digest_time` in the fresh `schedule` phase. I3 calls it from `set_setting`.
+   *
+   * Ending a task is a normal terminal transition (`aborted` outcome), so nothing is left half-woken:
+   * `ensureScheduled()` then finds no live task of the kind and creates a new one, exactly as after a
+   * restart. If a task refuses to end within {@link RESCHEDULE_WAIT_MS}, the change simply applies at
+   * the next cycle — the same behaviour as before I3, logged once.
+   */
+  reschedule(): Promise<NotifyScheduledTasks>;
 }
+
+/** How long {@link NotifyScheduler.reschedule} waits for a task to become terminal before giving up. */
+export const RESCHEDULE_WAIT_MS = 2_000;
+
+/** Poll interval while waiting for a terminal task record. */
+const RESCHEDULE_POLL_MS = 20;
 
 /** Scheduler over an open core; the task objects come from the installed registry (as V2 does). */
 export function createNotifyScheduler(core: Core, options: NotifySchedulerOptions = {}): NotifyScheduler {
   const context = options.context ?? BACKGROUND_CONTEXT;
+  const logger = options.logger ?? createLogger({ bindings: { module: "notify" } });
 
   function taskFor(taskName: string): Task<NotifyTaskInput, NotifyState, NotifyTaskResult, object> {
     const installed = registryFor(core).snapshot().task(taskName);
@@ -512,8 +542,26 @@ export function createNotifyScheduler(core: Core, options: NotifySchedulerOption
     return record.id as unknown as TaskId<NotifyTaskResult>;
   }
 
-  return {
-    async ensureScheduled(): Promise<NotifyScheduledTasks> {
+  /** End the live task of `taskName` (if any) and wait until its record is terminal. */
+  async function endLiveTask(taskName: string): Promise<void> {
+    const live = await liveTaskId(taskName);
+    if (live === undefined) return;
+
+    await core.harness.abortTask(live as unknown as TaskId, context);
+    const deadline = Date.now() + RESCHEDULE_WAIT_MS;
+    while (Date.now() < deadline) {
+      if ((await liveTaskId(taskName)) === undefined) return;
+      await new Promise((resolve) => setTimeout(resolve, RESCHEDULE_POLL_MS));
+    }
+    // The abort was requested but the record is not terminal yet; `ensureScheduled` will then keep the
+    // old task and the new time applies at its next cycle (the pre-I3 behaviour).
+    logger.warn("notify: the previous task did not end in time, the schedule applies next cycle", {
+      kind: taskName,
+      waitMs: RESCHEDULE_WAIT_MS,
+    });
+  }
+
+  async function ensureScheduled(): Promise<NotifyScheduledTasks> {
       const kinds = [REMINDER_TASK_NAME, DIGEST_TASK_NAME] as const;
       const ids = new Map<string, TaskId<NotifyTaskResult>>();
       const missing: string[] = [];
@@ -554,6 +602,15 @@ export function createNotifyScheduler(core: Core, options: NotifySchedulerOption
         throw new Error("notify tasks were not created");
       }
       return { reminderTaskId: String(reminderTaskId), digestTaskId: String(digestTaskId) };
+  }
+
+  return {
+    ensureScheduled,
+
+    async reschedule(): Promise<NotifyScheduledTasks> {
+      await endLiveTask(REMINDER_TASK_NAME);
+      await endLiveTask(DIGEST_TASK_NAME);
+      return ensureScheduled();
     },
   };
 }

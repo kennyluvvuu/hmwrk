@@ -247,6 +247,23 @@ describe("durable idempotency key (K4)", () => {
     expect(first).toMatch(/^auto-[0-9a-f]{40}$/);
   });
 
+  /**
+   * I3: the fallback is salted with the conversation's committed state, so the I2 trade-off (two
+   * identical questions in a row collapsing into one turn) is gone while a retry of the *same*
+   * request in the same state still maps onto the same submission.
+   */
+  it("separates the same words repeated in a new conversation state", () => {
+    const idle = deriveRequestId(undefined, actor, request, "empty");
+    const afterFirstAnswer = deriveRequestId(undefined, actor, request, "7");
+    const afterMoreEvents = deriveRequestId(undefined, actor, request, "9");
+
+    expect(new Set([idle, afterFirstAnswer, afterMoreEvents]).size).toBe(3);
+    // The same request in the same state is still the same key — that is what retries rely on.
+    expect(deriveRequestId(undefined, actor, request, "7")).toBe(afterFirstAnswer);
+    // And an empty state keeps the pre-I3 hash, so a caller without the harness is unaffected.
+    expect(deriveRequestId(undefined, actor, request, "")).toBe(deriveRequestId(undefined, actor, request));
+  });
+
   it("separates different actors and different messages", () => {
     const other = deriveRequestId(undefined, { ...actor, userId: "key:child" }, request);
     const changed = deriveRequestId(undefined, actor, {

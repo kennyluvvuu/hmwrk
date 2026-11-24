@@ -395,13 +395,31 @@ describe("hmwrk.reminder", () => {
     expect(telegram.sent).toHaveLength(0);
   });
 
-  it("covers the next 24 hours only: an assignment due tomorrow evening is not in tonight's list", async () => {
+  it("reaches the end of tomorrow: the default «завтра 20:00» deadline is in tonight's list", async () => {
     const fixture = household();
     await bindChats(fixture.repos, {});
-    // SPEC §5.6 window: [now, now + 24h]. Due tomorrow 20:00 is 32 h away from noon, so tonight's
-    // reminder stays silent and the child hears about it at tomorrow's 19:00 firing instead.
+    // The W7 verdict on the reminder window: [now, start of the day after tomorrow). Tomorrow 20:00
+    // is 32 h away from noon — the old `now + 24h` horizon missed exactly the case SPEC §5.6 names
+    // («завтра сдать» with the default deadline).
     await seedDueAssignment(fixture.repos, fixture.clock, {
       due: atLocalTime(addLocalDays(START, 1), "20:00"),
+    });
+    const telegram = fakeSender();
+    const opened = await openCore(fixture, telegram.sender);
+    const { reminderId } = await start(opened);
+    await firstSleep(opened, reminderId);
+
+    const result = await fireAt(opened, fixture.clock, reminderId, atLocalTime(START, "19:00"));
+
+    expect(result).toMatchObject({ status: "sent", entries: 1 });
+    expect(telegram.sent).toEqual([{ chatId: "chat-child", text: "напоминание: Математика" }]);
+  });
+
+  it("stops at local midnight after tomorrow: the day after is not in tonight's list", async () => {
+    const fixture = household();
+    await bindChats(fixture.repos, {});
+    await seedDueAssignment(fixture.repos, fixture.clock, {
+      due: atLocalTime(addLocalDays(START, 2), "00:01"),
     });
     const telegram = fakeSender();
     const opened = await openCore(fixture, telegram.sender);
@@ -548,5 +566,43 @@ describe("createNotifyScheduler", () => {
 
     expect(second).toEqual(first);
     expect(first.reminderTaskId).not.toBe(first.digestTaskId);
+  });
+
+  it("reschedule() applies a new time to the nearest window instead of tomorrow's", async () => {
+    const fixture = household();
+    await bindChats(fixture.repos, {});
+    await seedDueAssignment(fixture.repos, fixture.clock);
+    const telegram = fakeSender();
+    const opened = await openCore(fixture, telegram.sender);
+    const before = await createNotifyScheduler(opened).ensureScheduled();
+    await firstSleep(opened, Number(before.reminderTaskId) as TaskId<never>);
+
+    // `set_setting` wrote the value; the live task is still parked at 19:00 and would see it only
+    // after firing — reschedule() is what makes the change immediate (I3).
+    await fixture.repos.settings.set("reminder_time", "21:30");
+    const after = await createNotifyScheduler(opened).reschedule();
+
+    expect(after.reminderTaskId).not.toBe(before.reminderTaskId);
+    expect(after.digestTaskId).not.toBe(before.digestTaskId);
+    const parkedAfter = await firstSleep(opened, Number(after.reminderTaskId) as TaskId<never>);
+    expect(parkedAfter.until).toBe(atLocalTime(START, "21:30").getTime());
+
+    // The previous records are terminal, so a later `ensureScheduled()` cannot resurrect them.
+    const old = await opened.harness.getTask(Number(before.reminderTaskId) as TaskId<never>, BACKGROUND_CONTEXT);
+    expect(old?.state.status).toBe("terminal");
+    expect(await createNotifyScheduler(opened).ensureScheduled()).toEqual(after);
+  });
+
+  it("reschedule() is idempotent when nothing is live yet", async () => {
+    const fixture = household();
+    await bindChats(fixture.repos, {});
+    const telegram = fakeSender();
+    const opened = await openCore(fixture, telegram.sender);
+
+    const first = await createNotifyScheduler(opened).reschedule();
+    const second = await createNotifyScheduler(opened).reschedule();
+
+    expect(second.reminderTaskId).not.toBe(first.reminderTaskId);
+    expect(second).toEqual(await createNotifyScheduler(opened).ensureScheduled());
   });
 });

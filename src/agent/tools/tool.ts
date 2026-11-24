@@ -32,7 +32,7 @@ import type { VerifySpawner } from "../../contracts/tasks.js";
 import { DomainError } from "../../domain/errors.js";
 import { parseToolArgs, toolArgsSchema } from "../../domain/schemas.js";
 import { isToolAllowed } from "../../domain/types.js";
-import type { Repos, ToolArgs, ToolName } from "../../domain/index.js";
+import type { Repos, SettingKey, ToolArgs, ToolName } from "../../domain/index.js";
 import { ROLE_TITLE_RU } from "./format.js";
 import type { ScreenshotIntake } from "./screenshot-draft.js";
 
@@ -49,6 +49,12 @@ export interface ToolEnvironment {
    * half is not connected instead of failing in an unclear way.
    */
   readonly intake?: ScreenshotIntake;
+  /**
+   * I3: called after a successful `set_setting` of a broadcast schedule key (`reminder_time`,
+   * `digest_time`). Boot passes the notify scheduler's `reschedule`; without it (tool tests, a boot
+   * with no Telegram token) the change simply applies from the next cycle.
+   */
+  readonly onScheduleSettingsChanged?: (key: SettingKey) => void | Promise<void>;
 }
 
 /** One call, already authorised: who calls, against which data, at which instant. */
@@ -60,6 +66,8 @@ export interface ToolRun {
   readonly now: Date;
   /** See {@link ToolEnvironment.intake}. */
   readonly intake?: ScreenshotIntake;
+  /** See {@link ToolEnvironment.onScheduleSettingsChanged}. */
+  readonly onScheduleSettingsChanged?: (key: SettingKey) => void | Promise<void>;
 }
 
 /**
@@ -158,6 +166,9 @@ async function runDomainTool<N extends ToolName>(
     spawnVerify: env.spawnVerify,
     now: env.now(),
     ...(env.intake === undefined ? {} : { intake: env.intake }),
+    ...(env.onScheduleSettingsChanged === undefined
+      ? {}
+      : { onScheduleSettingsChanged: env.onScheduleSettingsChanged }),
   };
   try {
     return textResult(await tool.run(run, args));

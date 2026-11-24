@@ -136,6 +136,42 @@ describe("set_setting", () => {
     expect(await harness.repos.settings.get("reminder_time")).toBe("20:30");
   });
 
+  it("I3: смена времени рассылки пересобирает расписание, остальные ключи — нет", async () => {
+    const harness = createToolHarness({ onScheduleSettingsChanged: () => undefined });
+
+    const reminder = resultText(
+      await harness.call("set_setting", PARENT_CONVERSATION, { key: "reminder_time", value: "20:30" }),
+    );
+    expect(reminder).toContain("Расписание напоминаний пересобрано");
+
+    const digest = resultText(
+      await harness.call("set_setting", PARENT_CONVERSATION, { key: "digest_time", value: "21:15" }),
+    );
+    expect(digest).toContain("Расписание дайджеста пересобрано");
+
+    await harness.call("set_setting", PARENT_CONVERSATION, { key: "paused_until", value: "2026-12-31" });
+    await harness.call("set_setting", PARENT_CONVERSATION, { key: "default_due", value: "20:00 след. дня" });
+
+    // Only the two broadcast times re-plan the durable tasks: a pause is read at fire time, and a
+    // default deadline never touches the schedule at all.
+    expect(harness.scheduleCalls).toEqual(["reminder_time", "digest_time"]);
+  });
+
+  it("I3: сломанный хук не ломает сохранение настройки", async () => {
+    const harness = createToolHarness({
+      onScheduleSettingsChanged: () => {
+        throw new Error("scheduler is down");
+      },
+    });
+
+    const result = await harness.call("set_setting", PARENT_CONVERSATION, { key: "reminder_time", value: "20:30" });
+
+    expect(result.isError).toBeUndefined();
+    expect(resultText(result)).toContain("20:30");
+    expect(resultText(result)).toContain("к следующим напоминаниям");
+    expect(await harness.repos.settings.get("reminder_time")).toBe("20:30");
+  });
+
   it("default_due принимает человеческую форму из SPEC §5.7", async () => {
     const harness = createToolHarness();
     const text = resultText(

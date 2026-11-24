@@ -1,0 +1,82 @@
+{
+  "chat": [
+    {
+      "toolCalls": [{ "name": "set_setting", "arguments": { "key": "reminder_time", "value": "__REMINDER_TIME__" } }]
+    },
+    "$lastToolResultText",
+    {
+      "toolCalls": [{ "name": "set_setting", "arguments": { "key": "digest_time", "value": "__DIGEST_TIME__" } }]
+    },
+    "$lastToolResultText",
+    {
+      "toolCalls": [
+        {
+          "name": "manual_add_assignment",
+          "arguments": {
+            "subject": "Математика <5.1>",
+            "items": ["№ 12", "№ 13"],
+            "due_at": "__MATH_DUE__"
+          }
+        }
+      ]
+    },
+    "$lastToolResultText",
+    {
+      "toolCalls": [
+        {
+          "name": "manual_add_assignment",
+          "arguments": {
+            "subject": "Литература & чтение",
+            "items": ["стр. 40"],
+            "due_at": "__LIT_DUE__"
+          }
+        }
+      ]
+    },
+    "$lastToolResultText",
+    { "toolCalls": [{ "name": "list_assignments", "arguments": {} }] },
+    {
+      "toolCalls": [
+        {
+          "name": "submit_check_in",
+          "arguments": {
+            "assignment_id": "$lastToolResultId",
+            "photo_ids": "$userPhotoIds",
+            "comment": "№ 13 не уверен"
+          }
+        }
+      ]
+    },
+    "$lastToolResultText",
+    {
+      "toolCalls": [
+        {
+          "name": "manual_add_assignment",
+          "arguments": {
+            "subject": "Русский язык",
+            "items": ["упр. 3"],
+            "due_at": "__RUSSIAN_DUE__"
+          }
+        }
+      ]
+    },
+    "$lastToolResultText",
+    { "toolCalls": [{ "name": "parse_screenshot", "arguments": { "photo_ids": "$userPhotoIds" } }] },
+    "$lastToolResultText",
+    {
+      "toolCalls": [{ "name": "set_setting", "arguments": { "key": "paused_until", "value": "__TODAY__" } }]
+    },
+    "$lastToolResultText",
+    {
+      "toolCalls": [{ "name": "set_setting", "arguments": { "key": "digest_time", "value": "__DIGEST_LATE__" } }]
+    },
+    "$lastToolResultText"
+  ],
+  "read": [
+    "№ 12: 5 + 7 = 12\n№ 13: видно только «13», без решения",
+    "{\"assignments\":[{\"subject\":\"География\",\"due\":\"__GEO_DUE__\",\"items\":[{\"label\":\"§ 12\",\"note\":\"стр. 54\"}]}],\"warnings\":[\"дату прочитал неуверенно\"]}"
+  ],
+  "verify": [
+    "{\"items\":[{\"label\":\"№ 12\",\"verdict\":\"ok\",\"comment\":\"решение верное\"},{\"label\":\"№ 13\",\"verdict\":\"missing\",\"comment\":\"решения нет\"}],\"summary\":\"№ 12 решено верно, № 13 не решено.\"}"
+  ]
+}

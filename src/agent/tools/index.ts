@@ -23,7 +23,7 @@ import type { ActorDirectory, AgentToolset } from "../../contracts/index.js";
 import type { ToolDeps } from "../../contracts/tasks.js";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { TOOL_NAMES } from "../../domain/types.js";
-import type { ToolName } from "../../domain/types.js";
+import type { SettingKey, ToolName } from "../../domain/types.js";
 import { listAssignmentsTool } from "./listAssignments.js";
 import { parseScreenshotTool } from "./parseScreenshot.js";
 import { manualAddAssignmentTool } from "./manualAddAssignment.js";
@@ -44,6 +44,8 @@ export interface HmwrkToolOptions {
    * `readImages` and D2's `PhotoFiles`; without it the tool reports that intake is not connected.
    */
   readonly intake?: ScreenshotIntake;
+  /** I3: `set_setting` hook that re-plans the reminder/digest tasks (boot passes the scheduler). */
+  readonly onScheduleSettingsChanged?: (key: SettingKey) => void | Promise<void>;
 }
 
 /**
@@ -64,6 +66,9 @@ export function createHmwrkTools(
     now: deps.now,
     actors,
     ...(options.intake === undefined ? {} : { intake: options.intake }),
+    ...(options.onScheduleSettingsChanged === undefined
+      ? {}
+      : { onScheduleSettingsChanged: options.onScheduleSettingsChanged }),
   };
 
   // `Record<ToolName, …>` rather than `Partial<…>`: the compiler then refuses a toolset that lost

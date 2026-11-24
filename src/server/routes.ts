@@ -8,6 +8,7 @@
  * for `scripts/verify-m1.sh` and for a key-less smoke run.
  */
 import { createHash, randomUUID } from "node:crypto";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Hono } from "hono";
 import type { Core, CoreConversation, EchoOptions } from "../contracts/harness.js";
 import {
@@ -45,7 +46,13 @@ import { SSE_HEADERS, sseBody, type SseEmit } from "./sse.js";
  * generation path (`submitUserInput`/`watchText`/`abort`) is typed on its own as
  * {@link import("./turn.js").GenerationCore}, so the echo-only fake core stays valid.
  */
-export type ServerCore = Pick<Core, "getOrCreateConversation" | "echo">;
+export type ServerCore = Pick<Core, "getOrCreateConversation" | "echo"> &
+  /**
+   * I3: read-only, used to salt the fallback `requestId` with the conversation's committed state.
+   * Optional so the echo-only fakes of the route tests stay valid; without it the fallback is the
+   * pre-I3 hash.
+   */
+  Partial<Pick<Core, "harness">>;
 
 // ---------------------------------------------------------------------------
 // One turn, whichever mechanism produces it
@@ -120,27 +127,32 @@ function errorBody(message: string, type: string, code: string | null) {
  * K4: the durable idempotency key of one HTTP request.
  *
  * `X-Request-Id` wins when the client sends one. Otherwise the key is a hash of what the answer
- * depends on — the actor, the model and the messages — so an OpenWebUI retry of the very same
- * request lands on the same submission and produces no second pair of entries.
+ * depends on — the actor, the model, the messages and (I3) the conversation's committed state — so
+ * an OpenWebUI retry of the very same request lands on the same submission and produces no second
+ * pair of entries.
  *
- * Known trade-off: two genuinely identical user messages in a row are also one run. It is the price
- * of idempotency without a client-side key, and the plan accepts it for M2 (see the I2 report).
+ * The state salt closes the I2 trade-off (W5–W6 finding): without it two genuinely identical user
+ * messages in a row collapsed into one run, and the second real question got the first answer back.
+ * With the conversation's newest entry id in the hash, a retry in the *same* state is still the same
+ * request, while the same words after new events (the previous answer, a check-in, a verdict) are a
+ * new turn. `state` is `""` when the caller cannot read it — then this is the pre-I3 behaviour.
  */
 export function deriveRequestId(
   headerValue: string | undefined,
   actor: ResolvedActor,
   request: ChatCompletionRequest,
+  state = "",
 ): string {
   const fromHeader = headerValue?.trim();
   if (fromHeader !== undefined && fromHeader !== "") return fromHeader;
-  const digest = createHash("sha256")
+  const hash = createHash("sha256")
     .update(actor.userId)
     .update("\u0000")
     .update(MODEL_ID)
     .update("\u0000")
-    .update(JSON.stringify(request.messages))
-    .digest("hex");
-  return `auto-${digest.slice(0, 40)}`;
+    .update(JSON.stringify(request.messages));
+  if (state !== "") hash.update("\u0000").update(state);
+  return `auto-${hash.digest("hex").slice(0, 40)}`;
 }
 
 /**
@@ -149,6 +161,27 @@ export function deriveRequestId(
  * Values carry the account identity and are never logged. At `LOG_LEVEL=debug` this is what the
  * manual OpenWebUI checkpoint reads back to confirm what the current OpenWebUI version sends.
  */
+/**
+ * I3: the conversation's committed state, as its newest entry id — a monotone counter over the
+ * transcript, read in a write-free commit (the same trick the notify scheduler uses to find a live
+ * task). An empty string means «unknown», which leaves the fallback hash as it was in M2.
+ */
+async function conversationState(
+  core: ServerCore,
+  conversation: CoreConversation,
+  logger: Logger | undefined,
+): Promise<string> {
+  if (core.harness === undefined) return "";
+  try {
+    const latest = await core.harness.commit((tx) => tx.latestEntryId(conversation.id), BACKGROUND_CONTEXT);
+    return latest === undefined ? "empty" : String(latest);
+  } catch (error) {
+    // A state read must never cost the user an answer; idempotency degrades to the I2 hash.
+    logger?.warn("could not read the conversation state for the request id", { error });
+    return "";
+  }
+}
+
 function openWebUiHeaderNames(headers: Headers): string[] {
   const names: string[] = [];
   headers.forEach((_value, name) => {
@@ -262,7 +295,12 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
 
     // One durable conversation per actor (K3); the role travels with it for the prompt (A1).
     const conversation = await core.getOrCreateConversation(actor.userId, actor.role);
-    const requestId = deriveRequestId(c.req.header(REQUEST_ID_HEADER), actor, request);
+    const requestId = deriveRequestId(
+      c.req.header(REQUEST_ID_HEADER),
+      actor,
+      request,
+      await conversationState(core, conversation, logger),
+    );
     const turnInput: MappedInput = { input: text, text, images: mapped.images };
     const base: CompletionBase = {
       id: `chatcmpl-${randomUUID()}`,

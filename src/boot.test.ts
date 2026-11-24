@@ -104,6 +104,20 @@ describe("boot: roles (ADR 0004 hybrid)", () => {
     expect(app.resolver.mode).toBe("hybrid");
   });
 
+  /**
+   * I3: the static keys own the two `users` rows. Without them `bind-telegram` has nobody to bind a
+   * chat to (it binds a users row) and the broadcasts resolve zero recipients — the M3 hole this
+   * closes. Header mode still logs in a real account and is untouched.
+   */
+  it("creates the users rows the static keys own", async () => {
+    const parent = await app.domain.repos.users.getByOpenWebUiId("key:parent");
+    const child = await app.domain.repos.users.getByOpenWebUiId("key:child");
+
+    expect(parent).toMatchObject({ role: "parent", name: "Родитель" });
+    expect(child).toMatchObject({ role: "child", name: "Ребёнок" });
+    expect((await app.domain.repos.users.listByRole("parent")).length).toBeGreaterThanOrEqual(1);
+  });
+
   it("falls back to static keys when no user header is sent", async () => {
     const result = await app.resolver.authorize({
       get: (name) => (name.toLowerCase() === "authorization" ? `Bearer ${KEYS.childKey}` : undefined),
@@ -119,6 +133,71 @@ describe("boot: roles (ADR 0004 hybrid)", () => {
       get: (name) => (name.toLowerCase() === "x-openwebui-user-id" ? "owui-unknown" : undefined),
     });
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("boot: notifications (I3)", () => {
+  /**
+   * Broadcast task kinds in the shared file. The storage adapter keeps `kind` JSON-encoded (quoted),
+   * so the raw column is normalised here instead of guessing the quoting in SQL.
+   */
+  async function scheduledKinds(core: HmwrkApp["core"]): Promise<string[]> {
+    const rows = await core.db.all<{ kind: string }>("SELECT kind FROM pi_tasks");
+    return rows.map((row) => row.kind.replaceAll('"', "")).sort();
+  }
+
+  /** A config with one (fake) bot token; the API origin is never called by these tests. */
+  function notifyConfig(dataDir: string): Config {
+    return {
+      ...testConfig(dataDir),
+      secrets: { telegramBotToken: "123456789:test-token" },
+      telegramApiUrl: "http://127.0.0.1:9",
+    };
+  }
+
+  it("schedules both broadcast tasks and does not duplicate them on a restart", async () => {
+    const dir = makeTempDir("hmwrk-boot-notify-");
+    let ids: { reminderTaskId: string; digestTaskId: string } | undefined;
+    try {
+      const first = await createHmwrkApp({ config: notifyConfig(dir.dir), llm: buildFauxLlm(), logger: silentLogger() });
+      try {
+        expect(first.notify).not.toBeNull();
+        ids = first.notify?.tasks;
+        expect(ids?.reminderTaskId).not.toBe(ids?.digestTaskId);
+
+        const snapshot = registryFor(first.core).snapshot();
+        expect(snapshot.task("hmwrk.reminder")).toBeDefined();
+        expect(snapshot.task("hmwrk.digest")).toBeDefined();
+
+        expect(await scheduledKinds(first.core)).toEqual(["hmwrk.digest", "hmwrk.reminder"]);
+      } finally {
+        await first.close();
+      }
+
+      // The tasks are eternal sleeping records: a second boot finds the live ones and creates nothing.
+      const second = await createHmwrkApp({ config: notifyConfig(dir.dir), llm: buildFauxLlm(), logger: silentLogger() });
+      try {
+        expect(second.notify?.tasks).toEqual(ids);
+        // Exactly one live record per kind: the restart found the sleepers instead of adding more.
+        expect(await scheduledKinds(second.core)).toEqual(["hmwrk.digest", "hmwrk.reminder"]);
+      } finally {
+        await second.close();
+      }
+    } finally {
+      dir.remove();
+    }
+  });
+
+  it("installs no notify tasks at all without a bot token", async () => {
+    const dir = makeTempDir("hmwrk-boot-notoken-");
+    const booted = await createHmwrkApp({ config: testConfig(dir.dir), llm: buildFauxLlm(), logger: silentLogger() });
+    try {
+      expect(booted.notify).toBeNull();
+      expect(await scheduledKinds(booted.core)).toEqual([]);
+    } finally {
+      await booted.close();
+      dir.remove();
+    }
   });
 });
 
