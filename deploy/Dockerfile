@@ -24,6 +24,8 @@ RUN npm ci \
 # (DATA_DIR/models.json or MODELS_CONFIG), never in the image.
 COPY tsconfig.json ./
 COPY src ./src
+# Operator scripts (bind-telegram.ts): `docker compose exec hmwrk node --import tsx scripts/…`.
+COPY scripts ./scripts
 
 # Data dir for SQLite + photos; the hmwrk-data named volume is mounted here.
 # Created before the volume mount so an empty named volume inherits node's

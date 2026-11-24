@@ -44,6 +44,11 @@ export interface Config {
   modelsPath: string;
   secrets: ConfigSecrets;
   roles: RoleKeys;
+  /**
+   * Telegram Bot API origin (`TELEGRAM_API_URL`), e.g. a local mock for the e2e run (I3).
+   * Unset → `createTelegramClient` falls back to `https://api.telegram.org`.
+   */
+  telegramApiUrl?: string;
 }
 
 export interface LoadConfigOptions extends LoadEnvOptions {
@@ -83,6 +88,7 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
       parentKey: env.HMWRK_PARENT_KEY,
       childKey: env.HMWRK_CHILD_KEY,
     },
+    ...(env.TELEGRAM_API_URL === undefined ? {} : { telegramApiUrl: env.TELEGRAM_API_URL }),
   };
 }
 

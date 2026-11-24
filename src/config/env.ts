@@ -22,6 +22,25 @@ const optionalSecret = () =>
 
 const requiredSecret = () => z.string({ error: "is required, but missing" }).trim().min(1, "must not be empty");
 
+/** Base URL of an HTTP API (`TELEGRAM_API_URL`): must parse and be http(s), trailing slash allowed. */
+const optionalHttpUrl = () =>
+  z.preprocess(
+    emptyToUndefined,
+    z
+      .string()
+      .trim()
+      .min(1, "must not be empty")
+      .refine((value) => {
+        try {
+          const url = new URL(value);
+          return url.protocol === "http:" || url.protocol === "https:";
+        } catch {
+          return false;
+        }
+      }, "must be an http(s) URL")
+      .optional(),
+  );
+
 /**
  * Boolean env flag: `1`/`true` enable, `0`/`false`/unset disable. Deliberately not `z.coerce.boolean()`,
  * which turns the string `"0"` into `true`.
@@ -47,6 +66,11 @@ export const EnvSchema = z.object({
   GROQ_API_KEY: optionalSecret(),
   MISTRAL_API_KEY: optionalSecret(),
   TELEGRAM_BOT_TOKEN: optionalSecret(),
+  /**
+   * Bot API origin override, e.g. `http://127.0.0.1:8080` for the e2e mock server (I3).
+   * Default `https://api.telegram.org`; only the origin is configurable, not the method path.
+   */
+  TELEGRAM_API_URL: optionalHttpUrl(),
 
   // Role fallback (ADR 0004): two static keys, one per role, until OpenWebUI
   // user headers are confirmed at the M1 integration checkpoint.
