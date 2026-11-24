@@ -1,0 +1,79 @@
+# hmwrk deployment (SPEC §9). Run from this directory (`cd deploy`).
+#
+# hmwrk is deliberately NOT published on the host: OpenWebUI reaches it over the
+# compose network at http://hmwrk:8787/v1, and only OpenWebUI's 3000 is exposed.
+# The OpenAI connection itself is configured inside OpenWebUI's UI, not here.
+name: hmwrk
+
+services:
+  hmwrk:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: hmwrk:local
+    restart: unless-stopped
+    env_file:
+      # deploy/.env — copy of deploy/.env.example with real secrets.
+      - .env
+    environment:
+      # Container paths/times win over .env, where DATA_DIR=./data is for local
+      # `npm start` and TZ may be absent.
+      DATA_DIR: /data
+      PORT: "8787"
+      # Plan W1: reminders/digests must fire in the family's local time.
+      TZ: ${TZ:-Europe/Moscow}
+    volumes:
+      # SQLite file(s) + photos. Survives restarts and image updates.
+      - hmwrk-data:/data
+    networks:
+      - internal
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  open-webui:
+    # Intentionally pinned to an exact release instead of the rolling
+    # :main/:latest (which both follow main and move without notice).
+    # Updating = bump this tag, read the release notes, then
+    # `docker compose pull && docker compose up -d`.
+    image: ghcr.io/open-webui/open-webui:v0.13.4
+    restart: unless-stopped
+    ports:
+      # The only port published to the host: http://<server>:3000
+      - "3000:8080"
+    volumes:
+      # OpenWebUI's own data: users, chats, settings, connections.
+      - open-webui-data:/app/backend/data
+    networks:
+      - internal
+    depends_on:
+      hmwrk:
+        condition: service_healthy
+    healthcheck:
+      # The image is Python-based; curl is not guaranteed to be installed.
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)\" || exit 1",
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  hmwrk-data:
+  open-webui-data:
+
+networks:
+  internal:
+    driver: bridge

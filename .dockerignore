@@ -1,0 +1,22 @@
+# Build context = repository root (see deploy/docker-compose.yml).
+# The image only needs package.json, package-lock.json, tsconfig.json, src/.
+node_modules
+data
+dist
+coverage
+
+# Secrets: never send .env into the build context.
+.env
+.env.*
+!.env.example
+
+# Repo metadata and docs are not part of the runtime image.
+.git
+.gitignore
+plan
+docs
+
+# Local noise.
+*.log
+*.sqlite*
+.DS_Store
