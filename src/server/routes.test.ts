@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ChatCompletionChunk, OpenAIModelList } from "../contracts/openai.js";
+import { PNG_BYTES } from "../store/testkit.js";
 import { createRoleResolver } from "./auth.js";
-import { createApp } from "./routes.js";
+import { createApp, deriveRequestId } from "./routes.js";
 import { createFakeCore, type FakeCore } from "./testing/fake-core.js";
 
 const keys = { parentKey: "parent-secret", childKey: "child-secret" };
@@ -228,5 +229,110 @@ describe("one key = one durable conversation", () => {
       parentConversation?.id,
     ]);
     expect(core.echoes[1]?.role).toBe("child");
+  });
+});
+
+describe("durable idempotency key (K4)", () => {
+  const actor = { userId: "key:parent", role: "parent" as const, via: "api-key" as const };
+  const request = { model: "hmwrk", messages: [{ role: "user" as const, content: "что задано?" }] };
+
+  it("uses the X-Request-Id header when the client sends one", () => {
+    expect(deriveRequestId("  req-42 ", actor, request)).toBe("req-42");
+  });
+
+  it("derives a stable key from actor + model + messages when no header is sent", () => {
+    const first = deriveRequestId(undefined, actor, request);
+    const second = deriveRequestId("", actor, request);
+    expect(first).toBe(second);
+    expect(first).toMatch(/^auto-[0-9a-f]{40}$/);
+  });
+
+  it("separates different actors and different messages", () => {
+    const other = deriveRequestId(undefined, { ...actor, userId: "key:child" }, request);
+    const changed = deriveRequestId(undefined, actor, {
+      ...request,
+      messages: [{ role: "user", content: "что задано завтра?" }],
+    });
+    expect(other).not.toBe(deriveRequestId(undefined, actor, request));
+    expect(changed).not.toBe(deriveRequestId(undefined, actor, request));
+  });
+});
+
+describe("photos attached to a chat message (SPEC §5.4)", () => {
+  const PNG_URL = `data:image/png;base64,${Buffer.from(PNG_BYTES).toString("base64")}`;
+
+  function setupWithPhotos(): {
+    core: FakeCore;
+    saved: { kind: string; mime?: string }[];
+    request: (body: unknown) => Promise<Response>;
+  } {
+    const core = createFakeCore();
+    const saved: { kind: string; mime?: string }[] = [];
+    let next = 0;
+    const app = createApp({
+      core,
+      resolver: createRoleResolver({ keys }),
+      now: () => FIXED_NOW,
+      photoIntake: {
+        async save(input) {
+          saved.push({ kind: input.kind, ...(input.mime === undefined ? {} : { mime: input.mime }) });
+          next += 1;
+          return { id: `photo-${next}` };
+        },
+      },
+    });
+    return {
+      core,
+      saved,
+      request: (body) =>
+        Promise.resolve(
+          app.request("/v1/chat/completions", {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${keys.childKey}` },
+            body: JSON.stringify(body),
+          }),
+        ),
+    };
+  }
+
+  it("stores the image and appends its id to the submitted text", async () => {
+    const { core, saved, request } = setupWithPhotos();
+    const res = await request({
+      model: "hmwrk",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "сделал, фото прикладываю" },
+            { type: "image_url", image_url: { url: PNG_URL } },
+          ],
+        },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    expect(saved).toEqual([{ kind: "checkin", mime: "image/png" }]);
+    expect(String(core.echoes[0]?.input)).toContain("photo-1");
+    expect(String(core.echoes[0]?.input)).toContain("submit_check_in");
+  });
+
+  it("still answers when the image part is broken", async () => {
+    const { core, request } = setupWithPhotos();
+    const res = await request({
+      model: "hmwrk",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "вот фото" },
+            { type: "image_url", image_url: { url: "https://example.test/photo.jpg" } },
+          ],
+        },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    // Nothing was attached, so the text is submitted unchanged.
+    expect(core.echoes[0]?.input).toBe("вот фото");
   });
 });

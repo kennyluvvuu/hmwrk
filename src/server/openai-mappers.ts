@@ -157,12 +157,12 @@ export function messageText(content: ChatContent): string {
 }
 
 /**
- * K10 / M3 seam: image parts are only counted in M1.
+ * K10: the durable input is the **text** of the last user message; image parts are counted only.
  *
- * Decoding `data:` URLs into pi-durable blocks (`{ type: "image", data, mimeType }`), enforcing
- * `maxImageBytes` and saving photos to `data/photos` belongs to P1's photo intake; the echo turn
- * cannot use images anyway. Until then the bytes are not extracted, so `images` reports what was
- * *seen* rather than what was carried over — flip both `text` and `images` together in M3.
+ * Decoding belongs to the upload path, not to this pure mapper: `src/server/images.ts` turns the
+ * `data:` URLs into stored photos and appends their ids to the text (I2), and the agent passes those
+ * ids to `submit_check_in`. `images` therefore counts what was *seen*, which is what the route logs
+ * and what decides whether the decoder runs at all.
  */
 export function mapMessagesToInput(
   messages: readonly ChatMessage[],
@@ -258,13 +258,14 @@ export function chatCompletionResponse(
   base: CompletionBase,
   text: string,
   usage: CompletionUsage = ZERO_USAGE,
+  finishReason: FinishReason = "stop",
 ): ChatCompletionResponse {
   return {
     id: base.id,
     object: "chat.completion",
     created: base.created,
     model: base.model,
-    choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+    choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: finishReason }],
     usage,
   };
 }

@@ -4,7 +4,12 @@
 #
 # Boots the real core (`node --import tsx src/index.ts`) over a throwaway
 # DATA_DIR in $TMPDIR with fake role keys, then checks SPEC §3/§6 behaviour
-# against the running process:
+# against the running process.
+#
+# Since M2 (I2) the endpoint runs the real agent by default; this script pins
+# HMWRK_ECHO=1 to keep checking the model-free echo path (no API keys, no faux),
+# which is what M1's acceptance was. The live cycle is covered by
+# `src/cycle.test.ts` (faux models) and, from P2, by scripts/verify-m2.sh.
 #
 #   1. `GET /healthz` → 200
 #   2. `GET /v1/models` → exactly one model, `hmwrk`
@@ -150,7 +155,10 @@ start_core() { # $1 = log file
     LOG_LEVEL=debug \
     HMWRK_PARENT_KEY="$PARENT_KEY" \
     HMWRK_CHILD_KEY="$CHILD_KEY" \
+    HMWRK_ECHO=1 \
     node --import tsx src/index.ts >"$1" 2>&1 &
+  # HMWRK_ECHO=1: the M1 answer path (no model call, no keys). Remove it to
+  # exercise the agent, which needs real API keys or HMWRK_FAUX_LLM=1.
   SERVER_PID=$!
 }
 
@@ -531,10 +539,10 @@ else
   fail "boot log has no 'agent extension installed' record"
 fi
 
-if grep -q '"msg":"role resolver configured".*"mode":"static-keys"' "$LOG_1"; then
-  ok "role resolver runs in static-keys mode without a users directory (M1)"
+if grep -q '"msg":"role resolver configured".*"mode":"hybrid"' "$LOG_1"; then
+  ok "role resolver runs in hybrid mode (users table + static keys, ADR 0004)"
 else
-  fail "role resolver did not report static-keys mode"
+  fail "role resolver did not report hybrid mode"
 fi
 
 if grep -h '"level":"error"' "$LOG_1" "$LOG_2"; then

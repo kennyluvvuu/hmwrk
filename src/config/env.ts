@@ -22,6 +22,19 @@ const optionalSecret = () =>
 
 const requiredSecret = () => z.string({ error: "is required, but missing" }).trim().min(1, "must not be empty");
 
+/**
+ * Boolean env flag: `1`/`true` enable, `0`/`false`/unset disable. Deliberately not `z.coerce.boolean()`,
+ * which turns the string `"0"` into `true`.
+ */
+const flag = (defaultValue: "0" | "1" = "0") =>
+  z.preprocess(
+    emptyToUndefined,
+    z
+      .enum(["0", "1", "true", "false"], { error: "must be one of: 0, 1, true, false" })
+      .default(defaultValue)
+      .transform((value) => value === "1" || value === "true"),
+  );
+
 // Not strict: the process environment carries dozens of unrelated variables.
 export const EnvSchema = z.object({
   PORT: z.preprocess(
@@ -42,6 +55,19 @@ export const EnvSchema = z.object({
 
   /** Absolute path to a models.json outside DATA_DIR. */
   MODELS_CONFIG: optionalSecret(),
+
+  /**
+   * M1 echo path without a model (`/v1/chat/completions` writes the prompt back). Kept for
+   * `scripts/verify-m1.sh` and for a key-less smoke run; generation is the default since M2.
+   */
+  HMWRK_ECHO: flag(),
+  /**
+   * Test/dev hook: serve the single chat model with pi-ai's faux provider instead of groq/mistral,
+   * so a full agent cycle runs without API keys. Never enable in production: the model does not exist.
+   */
+  HMWRK_FAUX_LLM: flag(),
+  /** JSON script of the faux provider (see `src/faux.ts`); required for a scripted faux run. */
+  HMWRK_FAUX_SCRIPT: optionalSecret(),
 });
 
 export type EnvConfig = z.infer<typeof EnvSchema>;

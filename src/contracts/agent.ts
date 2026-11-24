@@ -22,7 +22,7 @@ import type {
 } from "@earendil-works/pi-durable";
 import type { z } from "zod";
 import type { ModelsConfig } from "../config/index.js";
-import type { IsoDate, Repos, Role } from "../domain/index.js";
+import type { AssignmentStatus, IsoDate, IsoDateTime, Repos, Role } from "../domain/index.js";
 import type { ActorDirectory } from "./harness.js";
 
 // ---------------------------------------------------------------------------
@@ -89,6 +89,25 @@ export type AgentCapabilities =
   /** M2+: tools wired; the list is exactly what the prompt advertises. */
   | { readonly kind: "tools"; readonly tools: readonly ToolName[] };
 
+/**
+ * One line of the SPEC §6 «active assignments» summary. Deliberately the domain `Assignment`
+ * fields A1's prompt already formats (see `AgentAssignmentSummary` in `src/agent/prompt.ts`),
+ * so boot passes rows it loaded and nothing else has to stay in sync.
+ */
+export interface ActiveAssignmentLine {
+  readonly subject: string;
+  readonly due_at: IsoDateTime;
+  readonly status: AssignmentStatus;
+}
+
+/**
+ * M2: where the prompt's assignment summary comes from. Boot wires it over `AssignmentsRepo`;
+ * absent (M1, tests) → the prompt says there is no summary instead of inventing one.
+ *
+ * The provider must be cheap and must not throw: it renders on **every** request.
+ */
+export type AssignmentSummaryProvider = () => Promise<readonly ActiveAssignmentLine[]>;
+
 /** Everything A1's extension factory may depend on. */
 export interface AgentDeps {
   /**
@@ -104,6 +123,8 @@ export interface AgentDeps {
   readonly tools?: AgentToolset;
   /** M2: data access for the tools (T1's repository contracts, D2 implements them). */
   readonly repos?: Repos;
+  /** M2: the SPEC §6 assignment summary rendered into the prompt (boot wires it, I2). */
+  readonly assignmentSummary?: AssignmentSummaryProvider;
   /** What the prompt may promise the model; default `{ kind: "skeleton" }` for M1. */
   readonly capabilities?: AgentCapabilities;
 }

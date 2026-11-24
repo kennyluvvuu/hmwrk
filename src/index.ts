@@ -1,30 +1,21 @@
 /**
- * hmwrk entry point (S2): load config, open the durable core, listen on PORT, shut down cleanly.
+ * hmwrk entry point.
  *
- * Dependency injection lives in {@link bootstrap}: the boot code passes the real
- * `openHarness` factory, tests pass a fake core — the HTTP layer itself never opens SQLite.
+ * Only process concerns live here: load config, build the wired application (`src/app.ts`), listen,
+ * and shut down on `SIGTERM`/`SIGINT`. Everything about *what* is wired — core, domain, LLM, agent,
+ * verify task, roles — is in {@link createHmwrkApp}, so this file has no ordering knowledge to get
+ * wrong and the integration tests drive the very same wiring.
+ *
+ * Tests pass a fake or temp-dir config through {@link bootstrap}; the HTTP layer never opens SQLite.
  */
-import { mkdirSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { buildAgentExtensions } from "./agent/index.js";
+import { createHmwrkApp, type CreateHmwrkAppOptions, type HmwrkApp } from "./app.js";
 import { ConfigError, createLogger, loadConfig, type Config, type Logger } from "./config/index.js";
-import { openHarness, type Core } from "./contracts/harness.js";
-import { installExtensions } from "./durable/index.js";
-import type { UserDirectory } from "./contracts/roles.js";
-import { createRoleResolver } from "./server/auth.js";
+import { shutdown } from "./durable/index.js";
 import { serve } from "./server/node-server.js";
-import { createApp } from "./server/routes.js";
 
-export interface BootstrapOptions {
-  readonly config: Config;
-  /** Opens the durable facade (S1's `openHarness`). Injected so tests stay harness-free. */
-  readonly openCore: (config: Config) => Promise<Core>;
+export interface BootstrapOptions extends Omit<CreateHmwrkAppOptions, "logger"> {
   readonly logger?: Logger;
-  /**
-   * `users` directory for OpenWebUI-header role resolution (SPEC §4). Absent until D2 ships its
-   * repository, so M1 roles come from the static keys only (resolver degrades to `static-keys`).
-   */
-  readonly users?: UserDirectory;
   /** Overrides `config.port` (`0` binds a free port). */
   readonly port?: number;
   readonly hostname?: string;
@@ -33,43 +24,25 @@ export interface BootstrapOptions {
 export interface RunningServer {
   /** Port actually bound (`config.port` or the OS-assigned one). */
   readonly port: number;
+  /** The wired application, for tests and for embedding. */
+  readonly app: HmwrkApp;
   /** Stops the HTTP server, then seals and closes the core (K11). Idempotent. */
   close(): Promise<void>;
 }
 
 /**
- * Boot sequence: create the data directory, open + resume the core, build the app, listen.
- * Logs `hmwrk listening on :PORT` once the socket is bound.
+ * Boot sequence: build the app (core → domain → LLM → verify → tools → agent → roles → runner),
+ * then listen. Logs `hmwrk listening on :PORT` once the socket is bound.
  */
 export async function bootstrap(options: BootstrapOptions): Promise<RunningServer> {
+  const { port, hostname, logger: injectedLogger, ...appOptions } = options;
   const { config } = options;
-  const logger = options.logger ?? createLogger({ level: config.logLevel, bindings: { module: "server" } });
+  const logger = injectedLogger ?? createLogger({ level: config.logLevel, bindings: { module: "server" } });
 
-  // Config resolves paths but never touches the filesystem; boot owns creating them.
-  mkdirSync(config.dataDir, { recursive: true });
-
-  const core = await options.openCore(config);
-  await core.resume();
-
-  // A1's empty agent: the `hmwrk` extension (role/date prompt section, no tools in M1).
-  // Installed after `openHarness` because its prompt section reads the actor directory
-  // that only an open core provides (K1/K7); M2 passes its tools through the same factory.
-  const extensions = buildAgentExtensions({
-    deps: { actors: core.actors, models: config.models },
-  });
-  installExtensions(core, extensions);
-  logger.info("agent extension installed", { extensions: extensions.map((extension) => extension.name) });
-
-  const resolver = createRoleResolver({
-    keys: config.roles,
-    ...(options.users === undefined ? {} : { users: options.users }),
-  });
-  logger.info("role resolver configured", { mode: resolver.mode });
-
-  const app = createApp({ core, resolver, logger });
-  const server = await serve(app, {
-    port: options.port ?? config.port,
-    ...(options.hostname === undefined ? {} : { hostname: options.hostname }),
+  const app = await createHmwrkApp({ ...appOptions, logger });
+  const server = await serve(app.app, {
+    port: port ?? config.port,
+    ...(hostname === undefined ? {} : { hostname }),
   });
   logger.info(`hmwrk listening on :${server.port}`, { port: server.port });
 
@@ -77,40 +50,29 @@ export async function bootstrap(options: BootstrapOptions): Promise<RunningServe
   const close = (): Promise<void> => {
     closing ??= (async () => {
       await server.close();
-      await core.close();
+      // K11: seal admission, settle committed commits, wait for running task code. The hard-exit
+      // safety timer lives in `shutdown()` — one shutdown path, not two.
+      await shutdown(app.core, { logger });
       logger.info("hmwrk stopped");
     })();
     return closing;
   };
 
-  return { port: server.port, close };
+  return { port: server.port, app, close };
 }
 
 /** Process entry point: real config, real core, SIGTERM/SIGINT handling. */
 async function main(): Promise<void> {
-  const config = loadConfig();
+  const config: Config = loadConfig();
   const logger = createLogger({ level: config.logLevel, bindings: { module: "boot" } });
 
-  const running = await bootstrap({
-    config,
-    logger,
-    // S1's facade (src/durable); a failed open aborts boot instead of serving nothing.
-    openCore: (loaded) => openHarness(loaded),
-  });
+  const running = await bootstrap({ config, logger });
 
-  const shutdown = (signal: NodeJS.Signals): void => {
+  const handle = (signal: NodeJS.Signals): void => {
     logger.info(`received ${signal}, shutting down`);
-    // K11: closing can take a moment (runs finish); never hang the host's `docker stop`.
-    const hardExit = setTimeout(() => {
-      logger.error("graceful shutdown timed out");
-      process.exit(1);
-    }, 10_000);
-    hardExit.unref();
+    // `shutdown()` inside `close()` guards a hanging close with its own timer (10 s, K11).
     void running.close().then(
-      () => {
-        clearTimeout(hardExit);
-        process.exit(0);
-      },
+      () => process.exit(0),
       (error: unknown) => {
         logger.error("shutdown failed", { error });
         process.exit(1);
@@ -118,8 +80,8 @@ async function main(): Promise<void> {
     );
   };
 
-  process.once("SIGTERM", () => shutdown("SIGTERM"));
-  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => handle("SIGTERM"));
+  process.once("SIGINT", () => handle("SIGINT"));
 }
 
 const invokedDirectly = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;

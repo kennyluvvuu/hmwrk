@@ -33,7 +33,7 @@ import {
 } from "../contracts/index.js";
 import { formatIsoDate } from "../domain/dates.js";
 import type { Role } from "../domain/types.js";
-import { renderAgentPrompt } from "./prompt.js";
+import { renderAgentPrompt, type AgentAssignmentSummary } from "./prompt.js";
 
 /**
  * Least-privilege fallback: an unknown conversation renders the child prompt.
@@ -119,7 +119,24 @@ async function renderSection(deps: AgentDeps, conversationId: ConversationId): P
     today: formatIsoDate(now),
     now,
   };
-  return renderAgentPrompt(ctx, resolveCapabilities(deps));
+  return renderAgentPrompt(ctx, resolveCapabilities(deps), await lookupAssignments(deps));
+}
+
+/**
+ * SPEC §6: the short «active assignments» list.
+ *
+ * Same rule as {@link lookupActor} — a section that throws is dropped as `extension_error` and the
+ * model then runs with no system prompt at all, so the summary degrades to an empty list. The
+ * provider is wired by boot over `AssignmentsRepo` (I2) and is already capped at
+ * `MAX_ASSIGNMENT_LINES` by the prompt renderer.
+ */
+async function lookupAssignments(deps: AgentDeps): Promise<readonly AgentAssignmentSummary[]> {
+  if (deps.assignmentSummary === undefined) return [];
+  try {
+    return await deps.assignmentSummary();
+  } catch {
+    return [];
+  }
 }
 
 async function lookupActor(deps: AgentDeps, conversationId: ConversationId): Promise<ActorRecord | null> {

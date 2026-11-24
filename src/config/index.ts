@@ -32,6 +32,13 @@ export interface Config {
    */
   dbPath: string;
   logLevel: LogLevel;
+  /** M1 echo path (`HMWRK_ECHO=1`): answer without a model instead of running the agent. */
+  echo: boolean;
+  /**
+   * Faux-LLM test hook (`HMWRK_FAUX_LLM=1`): `boot` swaps groq/mistral for pi-ai's scripted faux
+   * provider, so the whole cycle runs without API keys. `scriptPath` is `HMWRK_FAUX_SCRIPT`.
+   */
+  faux: { enabled: boolean; scriptPath?: string };
   models: ModelsConfig;
   /** Resolved models.json path that was actually loaded (log it at boot). */
   modelsPath: string;
@@ -60,6 +67,11 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
     photosDir: join(dataDir, "photos"),
     dbPath: join(dataDir, "hmwrk.sqlite"),
     logLevel: env.LOG_LEVEL,
+    echo: env.HMWRK_ECHO,
+    faux: {
+      enabled: env.HMWRK_FAUX_LLM,
+      ...(env.HMWRK_FAUX_SCRIPT === undefined ? {} : { scriptPath: resolve(process.cwd(), env.HMWRK_FAUX_SCRIPT) }),
+    },
     models: loadModelsFile(modelsPath),
     modelsPath,
     secrets: {

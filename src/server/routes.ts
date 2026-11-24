@@ -2,12 +2,12 @@
  * Hono application of the OpenAI-compatible server (S2): `POST /v1/chat/completions`,
  * `GET /v1/models`, `GET /healthz`, Bearer authentication (SPEC §3, §4, §6).
  *
- * M1 behaviour: the durable core answers with an echo turn (R1 K6, two entries in one commit);
- * the text is then either returned as one `chat.completion` or replayed as the K5 SSE sequence.
- * M2 replaces only {@link TurnRunner}: `submitUserInput` + `watchText` feed the same `onTextDelta`
- * sink, so framing, headers and the conversation plumbing stay as they are.
+ * The route owns framing, auth, the conversation, idempotency and photo intake; the agent itself
+ * lives behind {@link TurnRunner}. Boot passes {@link import("./turn.js").generationTurnRunner}
+ * (M2: `submitUserInput` + `watchText` + `settle`), while `HMWRK_ECHO=1` keeps the M1 echo runner
+ * for `scripts/verify-m1.sh` and for a key-less smoke run.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import type { Core, CoreConversation, EchoOptions } from "../contracts/harness.js";
 import {
@@ -32,6 +32,7 @@ import {
   parseChatCompletionRequest,
   splitText,
 } from "./openai-mappers.js";
+import { attachMessagePhotos, lastUserContent, photoAttachmentBlock, type PhotoSink } from "./images.js";
 import { SSE_HEADERS, sseBody, type SseEmit } from "./sse.js";
 
 // ---------------------------------------------------------------------------
@@ -39,10 +40,10 @@ import { SSE_HEADERS, sseBody, type SseEmit } from "./sse.js";
 // ---------------------------------------------------------------------------
 
 /**
- * Port of {@link Core} the HTTP layer needs today. `Core` satisfies it structurally, and keeping
- * the port narrow is what lets tests run against `testing/fake-core.ts` without a harness.
- *
- * M2 (I2) widens this with `submitUserInput` / `watchText` / `abort`.
+ * Port of {@link Core} the HTTP layer needs. `Core` satisfies it structurally, and keeping the
+ * port narrow is what lets tests run against `testing/fake-core.ts` without a harness. The M2
+ * generation path (`submitUserInput`/`watchText`/`abort`) is typed on its own as
+ * {@link import("./turn.js").GenerationCore}, so the echo-only fake core stays valid.
  */
 export type ServerCore = Pick<Core, "getOrCreateConversation" | "echo">;
 
@@ -54,10 +55,12 @@ export type ServerCore = Pick<Core, "getOrCreateConversation" | "echo">;
 export interface TurnRequest {
   readonly conversation: CoreConversation;
   readonly input: MappedInput;
-  /** Stable per HTTP request; M2 passes it as `requestId` for durable idempotency (K4). */
+  /** Stable per HTTP request; the generation runner passes it as `requestId` (K4 idempotency). */
   readonly requestId: string;
   /** Live text sink for the SSE path; absent for the non-streaming answer. */
   readonly onTextDelta?: (delta: string) => void;
+  /** Aborted when the client disconnects; the runner stops the run and keeps the partial answer. */
+  readonly signal?: AbortSignal;
 }
 
 /** The finished turn, in OpenAI terms. */
@@ -97,12 +100,61 @@ export interface AppOptions {
   readonly logger?: Logger;
   /** Clock for `created` fields; tests pin it. */
   readonly now?: () => number;
-  /** Overrides the M1 echo runner (M2 seam). */
+  /** The agent behind the endpoint. Default: the M1 echo (kept for `HMWRK_ECHO=1` and tests). */
   readonly turnRunner?: TurnRunner;
+  /**
+   * Photo store of `data:` images attached to the message (D2's `PhotoFiles`). Absent: image parts
+   * are counted but dropped, which is what the echo path and the route tests do.
+   */
+  readonly photoIntake?: PhotoSink;
 }
+
+/** Header carrying a client-chosen idempotency key (`X-Request-Id`). */
+export const REQUEST_ID_HEADER = "x-request-id";
 
 function errorBody(message: string, type: string, code: string | null) {
   return { error: { message, type, code } };
+}
+
+/**
+ * K4: the durable idempotency key of one HTTP request.
+ *
+ * `X-Request-Id` wins when the client sends one. Otherwise the key is a hash of what the answer
+ * depends on — the actor, the model and the messages — so an OpenWebUI retry of the very same
+ * request lands on the same submission and produces no second pair of entries.
+ *
+ * Known trade-off: two genuinely identical user messages in a row are also one run. It is the price
+ * of idempotency without a client-side key, and the plan accepts it for M2 (see the I2 report).
+ */
+export function deriveRequestId(
+  headerValue: string | undefined,
+  actor: ResolvedActor,
+  request: ChatCompletionRequest,
+): string {
+  const fromHeader = headerValue?.trim();
+  if (fromHeader !== undefined && fromHeader !== "") return fromHeader;
+  const digest = createHash("sha256")
+    .update(actor.userId)
+    .update("\u0000")
+    .update(MODEL_ID)
+    .update("\u0000")
+    .update(JSON.stringify(request.messages))
+    .digest("hex");
+  return `auto-${digest.slice(0, 40)}`;
+}
+
+/**
+ * SPEC §4 risk #3 instrumentation: which `X-OpenWebUI-*` headers arrived, **names only**.
+ *
+ * Values carry the account identity and are never logged. At `LOG_LEVEL=debug` this is what the
+ * manual OpenWebUI checkpoint reads back to confirm what the current OpenWebUI version sends.
+ */
+function openWebUiHeaderNames(headers: Headers): string[] {
+  const names: string[] = [];
+  headers.forEach((_value, name) => {
+    if (name.toLowerCase().startsWith("x-openwebui-")) names.push(name.toLowerCase());
+  });
+  return names.sort();
 }
 
 function authErrorBody(error: AuthError) {
@@ -115,7 +167,9 @@ function unixSeconds(now: () => number): number {
 }
 
 /** Parse + map, so both failures render as one 400 instead of two nested try blocks. */
-function parseRequest(raw: unknown): { request: ChatCompletionRequest; mapped: MappedInput } {
+type ParsedRequest = { request: ChatCompletionRequest; mapped: MappedInput };
+
+function parseRequest(raw: unknown): ParsedRequest {
   const request = parseChatCompletionRequest(raw);
   return { request, mapped: mapMessagesToInput(request.messages) };
 }
@@ -125,7 +179,7 @@ function parseRequest(raw: unknown): { request: ChatCompletionRequest; mapped: M
  * boot (`src/index.ts`) hands it to `serve()`.
  */
 export function createApp(options: AppOptions): Hono<AppEnv> {
-  const { core, resolver, logger } = options;
+  const { core, resolver, logger, photoIntake } = options;
   const now = options.now ?? (() => Date.now());
   const runTurn = options.turnRunner ?? echoTurnRunner(core);
 
@@ -142,6 +196,14 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
       return c.json(authErrorBody(result.error), result.error.httpStatus);
     }
     c.set("actor", result.actor);
+    if (logger !== undefined && logger.level === "debug") {
+      // Names only: the values are OpenWebUI account identifiers (see openWebUiHeaderNames).
+      logger.debug("request identity", {
+        via: result.actor.via,
+        role: result.actor.role,
+        openwebuiHeaders: openWebUiHeaderNames(c.req.raw.headers),
+      });
+    }
     await next();
   });
 
@@ -163,7 +225,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
       return c.json(errorBody("Request body must be valid JSON", "invalid_request_error", "invalid_json"), 400);
     }
 
-    let parsed: { request: ChatCompletionRequest; mapped: MappedInput };
+    let parsed: ParsedRequest;
     try {
       parsed = parseRequest(raw);
     } catch (error) {
@@ -174,7 +236,20 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     }
     const { request, mapped } = parsed;
 
-    if (mapped.text.trim() === "") {
+    // Attached photos become stored photo ids the agent passes to `submit_check_in` (SPEC §5.4).
+    // A broken image is a warning, never a failed message.
+    const attachments =
+      photoIntake === undefined || mapped.images === 0
+        ? { ids: [] as string[], problems: [] as string[] }
+        : await attachMessagePhotos(lastUserContent(request.messages) ?? "", { sink: photoIntake });
+    for (const problem of attachments.problems) logger?.warn("dropped an attached image", { problem });
+
+    const text =
+      attachments.ids.length === 0
+        ? mapped.text
+        : `${mapped.text}\n\n${photoAttachmentBlock(attachments.ids)}`;
+
+    if (text.trim() === "") {
       return c.json(
         errorBody("The last user message has no text content", "invalid_request_error", "empty_message"),
         400,
@@ -183,6 +258,8 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
 
     // One durable conversation per actor (K3); the role travels with it for the prompt (A1).
     const conversation = await core.getOrCreateConversation(actor.userId, actor.role);
+    const requestId = deriveRequestId(c.req.header(REQUEST_ID_HEADER), actor, request);
+    const turnInput: MappedInput = { input: text, text, images: mapped.images };
     const base: CompletionBase = {
       id: `chatcmpl-${randomUUID()}`,
       created: unixSeconds(now),
@@ -194,29 +271,39 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
       conversationId: conversation.id,
       stream: request.stream === true,
       images: mapped.images,
+      photos: attachments.ids.length,
+      requestId,
     });
 
     if (request.stream === true) {
+      // K5: the run is aborted when the SSE reader goes away (client closed the tab).
+      const disconnect = new AbortController();
       return c.body(
-        sseBody(async (emit: SseEmit) => {
-          // K5 step 1: the opening role delta.
-          emit(chunkFromDelta(base, { role: "assistant" }));
-          const outcome = await runTurn({
-            conversation,
-            input: mapped,
-            requestId: base.id,
-            onTextDelta: (delta) => emit(chunkFromDelta(base, { content: delta })),
-          });
-          // K5 step 3: empty delta + finish_reason (+ usage, which OpenWebUI ignores).
-          emit(finishChunk(base, outcome.finishReason, outcome.usage ?? ZERO_USAGE));
-        }),
+        sseBody(
+          async (emit: SseEmit) => {
+            // K5 step 1: the opening role delta.
+            emit(chunkFromDelta(base, { role: "assistant" }));
+            const outcome = await runTurn({
+              conversation,
+              input: turnInput,
+              requestId,
+              signal: disconnect.signal,
+              onTextDelta: (delta) => emit(chunkFromDelta(base, { content: delta })),
+            });
+            // K5 step 3: empty delta + finish_reason (+ usage, which OpenWebUI ignores).
+            emit(finishChunk(base, outcome.finishReason, outcome.usage ?? ZERO_USAGE));
+          },
+          { onCancel: () => disconnect.abort() },
+        ),
         200,
         SSE_HEADERS,
       );
     }
 
-    const outcome = await runTurn({ conversation, input: mapped, requestId: base.id });
-    return c.json(chatCompletionResponse(base, outcome.text, outcome.usage ?? ZERO_USAGE));
+    const outcome = await runTurn({ conversation, input: turnInput, requestId });
+    return c.json(
+      chatCompletionResponse(base, outcome.text, outcome.usage ?? ZERO_USAGE, outcome.finishReason),
+    );
   });
 
   app.notFound((c) => c.json(errorBody(`Not found: ${c.req.method} ${c.req.path}`, "invalid_request_error", null), 404));
