@@ -10,7 +10,7 @@
  * is a scheduling decision of the durable task that owns it.
  */
 
-/** Отправка исходящего сообщения (SPEC 5.6: sendMessage only). */
+/** Отправка исходящего сообщения (SPEC 5.6: sendMessage only; реализация — G1T-клиент, в тестах — фейк). */
 export interface TelegramSender {
   sendMessage(input: { chatId: string; text: string }): Promise<void>;
 }
