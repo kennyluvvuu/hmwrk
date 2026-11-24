@@ -1,21 +1,22 @@
-# Оркестратор hmwrk — рабочий playbook
+# hmwrk orchestrator playbook
 
-Этот файл фиксирует **протокол оркестрации**, по которому проект собирался (M1–M3, 20 субагент-задач, 9 волн), и по которому продолжается развитие репо. Роль оркестратора: **не писать код и исследования руками** — разбивать работу на атомарные задачи, спавнить субагентов, мержить и проверять результат, вести журнал решений. Код и research — только субагенты (явное требование владельца проекта).
+How the orchestrator runs this repo: product code and research go to BB subagents; the orchestrator owns only framing, briefs, merges, and the decision journal. Distilled from the M1–M3 buildout (20 subagent tasks across 9 waves). The full log and every decision live in [2026-11-24_m1-m3-parallel-buildout.md](2026-11-24_m1-m3-parallel-buildout.md) (RU): its §7–8 journal is the record; product truth is [docs/SPEC.md](../docs/SPEC.md) + [docs/adr/](../docs/adr/).
 
-Сопутствующие документы:
-- [2026-11-24_m1-m3-parallel-buildout.md](2026-11-24_m1-m3-parallel-buildout.md) — план волн + **журнал решений оркестратора (§7–8)** — читать перед любой новой волной;
-- [docs/SPEC.md](../docs/SPEC.md), [GLOSSARY.md](../GLOSSARY.md), [docs/adr/](../docs/adr/) — источник правды о продукте;
-- [docs/research/pi-api-notes.md](../docs/research/pi-api-notes.md) — верификация API pi-durable/pi-ai 1.6.0 (K1–K12).
+BB mechanics live in the guide chapters, not here — `bb guide threads` (spawn/handoff), `thread-inspection` (wait/inspect/output), `thread-messaging` (tell/steer/interactions), `thread-lifecycle` (retry), `environments` (worktrees). This playbook carries only what those chapters cannot: this project's own protocol.
 
-## 1. Модель декомпозиции
+## Role contract
 
-1. **Атомарная задача** = один субагент = один merge-блок: цель, список файлов-владений, тесты, самопроверка, формат отчёта.
-2. **Волны**: внутри волны задачи параллельны (до лимита хоста — 8; практично 3); волны последовательны.
-3. **Контракты раньше реализации**: типы/интерфейсы между будущими параллельными задачами пишутся отдельной волной (в этом проекте — T3), реализация волнами позже кодирует против них.
-4. **Владение файлами** в одной волне не пересекается; интеграционные волны (V*/I*) одиночные и могут править везде (мелко).
-5. **Швы между параллельными задачами** цитируются в брифах **дословно, одинаково для обеих сторон** (interface целиком). Тогда ожидаемый add/add конфликт на общем файле контракта разрешается тривиально при мерже (примеры: `src/contracts/tasks.ts`, `src/contracts/notify.ts`).
+**Hands on**: task framing, briefs, spawns, approvals, steers, merges, gate checks, journal and plan edits (each as its own commit — history is a deliverable), CLI glue for one-off commands.
+**Hands off**: product code, tests, dependencies, docs under `docs/` except the journal/plan. Those ship only from a subagent branch through the gate. A failing merge goes back to its subagent with the error; the orchestrator patches nothing.
 
-## 2. Спавн субагента
+## Vocabulary
+
+- **Wave** — one parallel batch of file-disjoint tasks; waves run in sequence. Contracts precede implementation: types shared by a wave are written in an earlier wave, so parallel tasks compile against one truth.
+- **Brief** — the single-task prompt for one subagent ($TMPDIR/briefs/, never committed). Structure below.
+- **Gate** — the merge ritual a finished task passes before it reaches `main`.
+- **Journal** — §7+ of the plan doc: the append-only record of wave verdicts and accepted defaults.
+
+## launching subagents
 
 ```bash
 bb thread spawn \
@@ -24,87 +25,40 @@ bb thread spawn \
   --provider pi --model mistral/deepseek-v4-1-flash-1017 --reasoning-level high \
   --new-environment worktree --base-branch refs/heads/main \
   --permission-mode full --parent-self --parent-notifications auto \
-  --title "<ID> · <название>" --json
+  --title "<ID> · <name>" --json
 ```
 
-- `--new-environment worktree --base-branch refs/heads/main` — изолированный git-worktree, ветка вида `bb/<id>-<thread>` от текущего `main`. `refs/heads/` обязателен: репо без origin.
-- `--permission-mode full` — провайдер `pi` не принимает других режимов (`bb thread spawn` вернёт HTTP 400 на `auto`).
-- `--parent-self --parent-notifications auto` — оркестратор (этот тред) получает уведомления о завершении и о «needs help».
-- Брифы живут вне репо (`$TMPDIR/briefs/`), потому что предназначены одному агенту и ссылаются на файлы репо по относительным путям.
+Two pins are project policy, the rest are stock flags: `--permission-mode full` (the `pi` provider rejects other modes), and `refs/heads/main` because this repo has no origin. Worktrees branch `bb/*-<thread>` off `main`.
 
-## 3. Структура брифа (отработана 20 задачами)
+## Brief anatomy
 
-1. **Контекст** — что читать в репо (точные пути: план-карточка задачи, SPEC-разделы, ADR, api-notes, слитые модули).
-2. **Интерфейсные швы** — дословно процитированные interface для параллельной задачи (если есть).
-3. **Цель → «Что сделать»** — нумерованные пункты; для интеграционных задач перечислены все точки склейки.
-4. **Владение файлами** + явные запреты.
-5. **Памятка по песочнице** (см. §7) — одинаковый блок во все брифы.
-6. **Самопроверка**: `npm ci && npm run typecheck && npm test` зелёные; `git status` чистый; готовый commit-месседж (Conventional Commits, EN, с ID задачи).
-7. **Формат отчёта**: ветка, решения, риски, что передать следующей волне. «Коротко, без воды».
+Each brief carries, in this order:
 
-Правка брифов руками: пиши русский текст внимательно и перечитывай — правило «перед spawn вычитать бриф на артефакты» появилось после смешанных скриптов в трёх брифах.
+1. **Context pointers** — exact paths the agent must read first: its plan card, SPEC sections, the pi-api-notes answers (K-numbers) it relies on.
+2. **Seam quotes** — when a wave has parallel tasks sharing an interface, the brief quotes the interface verbatim, identically on both sides. The add/add conflict on the shared file is then trivial to resolve at merge (this shipped `contracts/tasks.ts` and `contracts/notify.ts`).
+3. **Goal → numbered steps**, with the sandbox-memo block inlined.
+4. **File ownership** — files the task may write; everything else named off-limits.
+5. **Self-check** — green `npm ci && npm run typecheck && npm test`, clean `git status`, and a ready commit message (Conventional Commits, task ID in the subject).
+6. **Report format** — branch, decisions, risks, handoffs to the next wave. "Short, no filler."
 
-## 4. Жизненный цикл волны
+Write briefs in Russian and proofread before spawn: generated mixed-script artifacts reached several briefs during the buildout. The sandbox memo and command set already live in [AGENTS.md](../AGENTS.md) — briefs re-inline that block verbatim, they add nothing to it.
 
-1. Спавн задач волны (последовательные spawn-вызовы; возвращают thread id + `--json`).
-2. Ожидание: фоновый шелл `for t in …; do bb thread wait $t --status idle; done` (run_in_background), поллинг `bash_output`. Нюансы:
-   - `bb thread tell` (стир) **переводит поток в active** — waiter может отработать преждевременно; после стира поставь новый wait.
-   - финальное сообщение агента бывает «хвостовым» (уведомлении про npm ci) — настоящий отчёт смотри `bb thread output`, а при сомнении `bb thread log`.
-3. По завершении каждой задачи: **merge-гейт** (§5), не дожидаясь остальных волны.
-4. После всей волны: запись в журнал решений (§6).
+## Run cycle
 
-## 5. Merge-гейт
+1. **Frame** — read the journal, then split the user's goal into waves of file-disjoint tasks; write every brief of the wave before spawning any. Done when each brief passes proof-reading and file ownership is disjoint within the wave.
+2. **Launch** — spawn each task per the command above. Capture every thread id.
+3. **Tend** — wait through background shells (`bb guide thread-inspection`); answer `needs help` notices by resolving the pending interaction (`bb thread interactions`), then steer the agent with the workaround when a gate pattern repeats. A `tell` restarts a thread's turn — re-arm the wait afterwards. On a provider failure the thread errors and BB queues a retry itself; verify with `bb thread retry` (HTTP 409 means one is already queued). When the final agent message looks like a stray notification ("npm ci finished"), read `bb thread output` and `bb thread log` for the real report.
+4. **Gate each task as it finishes** — merge its branch into `main`; resolve an add/add contract conflict to the union of both docs and interfaces; then on merged `main`: `export npm_config_cache="$TMPDIR/npm-cache" && npm ci && npm run typecheck && npm test`. E2e: `scripts/verify-m1.sh` after wiring waves; the long `verify-m2.sh`/`verify-m3.sh` after milestone waves. Green gate = merge stands; red gate goes back to the subagent.
+5. **Close the wave** — append one journal line per wave (what held, what defaults were accepted, what was deferred) and commit it (`docs(plan): record <wave> verdicts`). Escalate to the owner only what breaks SPEC/ADRs, spends money, or touches credentials; record everything else in the journal yourself.
 
-1. `git merge bb/<id>-<thread>` в checkout `main` (merge-коммит с комментарием; fast-forward тоже норм).
-2. Конфликт add/add на контрактных файлах: взять объединение (документация + интерфейсы обеих сторон), проверить руками.
-3. Контрольный прогон на слитом `main`: `export npm_config_cache="$TMPDIR/npm-cache" && npm ci && npm run typecheck && npm test`. При падении — мелкий фикс руками оркестратора не делается: вернуть задачу субагенту (`bb thread tell`) с конкретной ошибкой.
-4. Для волн с e2e: прогнать соответствующий `scripts/verify-*.sh` на слитом main (только быстрый m1 — всегда; m2/m3 — после интеграционных волн).
+## Project gotchas (spawned agents will hit these)
 
-## 6. Журнал решений и эскалация
+The `pi` sandbox prompts on paths it reads as outside the project even in `--permission-mode full`. Known false positives, all legitimate work:
 
-- После каждой волны: дописать в [план §7+](2026-11-24_m1-m3-parallel-buildout.md) строку-вердикт с ID волны (что подтвердилось, какие вводные приняты, что отложено) и закоммитить (`docs(plan): record …`).
-- **Фиксируется молча** (в коде/журнале): дефолты в рамках спеки, мелкие расхождения имён, поведение edges.
-- **Эскалируется владельцу**: ломающие спеку решения (второй файл БД вместо одного, замена zod, изменение статусов/флоу продуктов), траты/новые зависимости, вопросы доступа/секретов.
-- Каждая правка спеки/плана — отдельным коммитом (история развития — отдельная ценность для владельца).
+| Trigger | The agent was doing |
+|---|---|
+| `cd node_modules/… && grep … ../file.d.ts` | reading a sibling `.d.ts` under its own worktree |
+| scratch files under `/tmp/…` | should have `$TMPDIR` |
+| paths under `~/.bb/plugins/environment-git-worktree/…` | touching worktree host-data |
 
-## 7. Операционные грабли (BB + песочница pi)
-
-### Permission-гейты субагентов
-
-`--permission-mode full` не отменяет гейты на «пути вне проекта». Субагенты в них затыкаются с приоритетом «needs help» на оркестратор. Известные триггеры — все **ложные срабатывания эвристики пути**, при законной intent:
-
-- `cd node_modules/… && grep ../types.d.ts` — относительный `../` в аргументах вылезает за корень worktree;
-- скратч в `/tmp/x.ts` вместо `$TMPDIR`;
-- чтение/запись в `~/.bb/plugins/environment-git-worktree/…` (host-data, sibling ворктри).
-
-Решение: `bb thread interactions list <id> --json` → `respond <interactionId> <thread> --value '{"requestId":"…","value":"Allow for session"}'` (JSON: requestId из payload.data.requestId). «Allow for session» не всегда покрывает следующий подслучай — держи `needs help` под контролем. После 2–3 однотипных гейтов — стир `bb thread tell <id> ' обход-паттерн…'` с конкретным рецептом (read-инструмент с путём от корня ворктри, без `cd`; скратч только в `$TMPDIR`).
-
-### Сбои провайдера
-
-Поток уходит в `error` (пример: Mistral 429 `backend_out_of_capacity`) → BB **сам ставит ретрай** в очередь; `bb thread retry <id>` возвращает 409 «already has a retry waiting» — это нормально, просто ждём.
-
-### Восходящие уголки
-
-- `bb thread wait` в фоновом шелле + `bash_output` с `wait_seconds` — единственный нормальный способ ждать 10-минутные задачи.
-- Отчёты «This is a notification about already completed npm ci» — артефакт фоновых шеллов самого агента; работа обычно уже закоммичена.
-
-## 8. Что оркестратор делает руками (и что нет)
-
-**Да**: план/журнал (правки + коммиты), брифы (вне репо), git-merge и контрольные прогоны, approvem гейтов, стиры-подсказки, мелкие CLI-склейки (python one-liners для bb CLI).
-**Нет**: код продукта (`src/**`), тесты, деплой-файлы, доки продукта — всё это только через субагентов с merge-гейтом.
-
-## 9. История сборки (краткий референс)
-
-| Волна | Задачи | Итог в `main` |
-|---|---|---|
-| W0 | T0 scaffolding | `f85eb5d` |
-| W1 | R1 research, T1 domain, T2 config | `6021ebe`, `e1123bc`, `14e079a` |
-| W2 | T3 contracts, E1 deploy | merges после `6021ebe` |
-| W3 | S1 durable, S2 server, A1 agent | merges W3 |
-| W4 | V1 e2e-m1, G1 openwebui guide | `verify-m1.sh` 27/27 |
-| W5 | D2 sqlite, A2 tools×9, V2 verify | merges W5 |
-| W6 | I2 wiring, P2 e2e-m2 | `verify-m2.sh` 94/94 |
-| W7 | P1 screenshot, G1T telegram, N1 schedules | merges W7 |
-| W8 | I3 wiring+e2e-m3 | `5380983`, `verify-m3.sh` 71/71 |
-
-Финал M1–M3: `typecheck` зелёный, **526 тестов**, три e2e зелёные. Открытые точки — в [плане §8](2026-11-24_m1-m3-parallel-buildout.md): ручные шаги владельца (живые ключи, Telegram-токен, compose+OpenWebUI checkpoint риска №3) и веха 4.
+Resolution: `bb thread interactions list <thread> --json` → `respond <interactionId> <thread> --value '{"requestId":"<payload.data.requestId>","value":"Allow for session"}'`. A session allowance covers one narrow pattern — the next variant prompts again; after two of the same kind, steer the agent with the recipe instead (paths from worktree root, no `../../`, scratch only in `$TMPDIR`).
