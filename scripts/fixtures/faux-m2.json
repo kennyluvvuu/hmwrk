@@ -1,0 +1,84 @@
+{
+  "chat": [
+    {
+      "toolCalls": [
+        {
+          "name": "manual_add_assignment",
+          "arguments": {
+            "subject": "Математика",
+            "items": ["№ 12", "№ 13", "№ 14"],
+            "due_at": "2099-01-01T10:00:00.000Z"
+          }
+        }
+      ]
+    },
+    "$lastToolResultText",
+    {
+      "toolCalls": [{ "name": "list_assignments", "arguments": {} }]
+    },
+    "$lastToolResultText",
+    {
+      "toolCalls": [{ "name": "list_assignments", "arguments": {} }]
+    },
+    {
+      "toolCalls": [
+        {
+          "name": "submit_check_in",
+          "arguments": {
+            "assignment_id": "$lastToolResultId",
+            "photo_ids": "$userPhotoIds",
+            "comment": "№ 13 не уверен"
+          }
+        }
+      ]
+    },
+    "$lastToolResultText",
+    {
+      "toolCalls": [{ "name": "get_verdicts", "arguments": {} }]
+    },
+    "$lastToolResultText",
+    {
+      "toolCalls": [{ "name": "get_verdicts", "arguments": {} }]
+    },
+    "$lastToolResultText",
+    {
+      "toolCalls": [{ "name": "get_verdicts", "arguments": {} }]
+    },
+    {
+      "toolCalls": [
+        {
+          "name": "approve_verification",
+          "arguments": { "verification_id": "$lastToolResultId" }
+        }
+      ]
+    },
+    "$lastToolResultText",
+    {
+      "toolCalls": [{ "name": "get_verdicts", "arguments": {} }]
+    },
+    "$lastToolResultText",
+    {
+      "toolCalls": [
+        {
+          "name": "manual_add_assignment",
+          "arguments": {
+            "subject": "Русский язык",
+            "items": ["упр. 3"],
+            "due_at": "2020-01-01T10:00:00.000Z"
+          }
+        }
+      ]
+    },
+    "$lastToolResultText",
+    {
+      "toolCalls": [{ "name": "list_assignments", "arguments": { "status": "overdue" } }]
+    },
+    "$lastToolResultText",
+    "Активных заданий: «Русский язык» ждёт отчёта."
+  ],
+  "read": ["№ 12: 5 + 7 = 12\n№ 13: видно только «13», без решения\n№ 14: 9 - 4 = 5"],
+  "verify": [
+    "{\"items\":[{\"label\":\"№ 12\",\"verdict\":\"ok\",\"comment\":\"решение верное\"},{\"label\":\"№ 13\",\"verdict\":\"missing\",\"comment\":\"решения нет\"},{\"label\":\"№ 14\",\"verdict\":\"ok\",\"comment\":\"верно\"}],\"summary\":\"№ 12 и № 14 решены верно, № 13 не решено.\"}"
+  ],
+  "repeatLast": { "chat": 3 }
+}

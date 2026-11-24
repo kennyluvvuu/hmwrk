@@ -4,7 +4,16 @@
  * These are shape tests only — the full agent cycle over the endpoint is `src/cycle.test.ts`.
  */
 import { describe, expect, it } from "vitest";
-import { buildFauxLlm, createFauxLlm, parseFauxScript, toFauxStep, FAUX_PROVIDERS } from "./faux.js";
+import type { FauxResponseFactory, Message, TranscriptContext } from "@earendil-works/pi-ai";
+import {
+  FAUX_PLACEHOLDER,
+  buildFauxLlm,
+  createFauxLlm,
+  parseFauxScript,
+  placeholderContext,
+  toFauxStep,
+  FAUX_PROVIDERS,
+} from "./faux.js";
 import { makeTempDir } from "./durable/testkit.js";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -49,6 +58,82 @@ describe("toFauxStep", () => {
     expect(message.stopReason).toBe("toolUse");
     expect(message.content[0]).toMatchObject({ type: "toolCall", name: "get_verdicts", arguments: { status: "all" } });
     expect(message.content[1]).toMatchObject({ type: "text", text: "сейчас посмотрю" });
+  });
+});
+
+describe("placeholders", () => {
+  const assignmentId = "33333333-3333-4333-8333-333333333333";
+  const photoA = "11111111-1111-4111-8111-111111111111";
+  const photoB = "22222222-2222-4222-8222-222222222222";
+  const toolResult = `• «Математика» — к 01.01.2099 10:00 — ждёт отчёта\n   пункты: № 12, № 13\n   id: ${assignmentId}`;
+  const messages = [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: `сделал математику\n\n[к сообщению прикреплены фото: ${photoA}, ${photoB} — передай их в submit_check_in как photo_ids]` },
+      ],
+      timestamp: 1,
+    },
+    {
+      role: "toolResult",
+      toolCallId: "tool-1",
+      toolName: "list_assignments",
+      content: [{ type: "text", text: toolResult }],
+      isError: false,
+      timestamp: 2,
+    },
+  ] as unknown as Message[];
+
+  it("reads the last tool result and the photo block from the transcript", () => {
+    expect(placeholderContext(messages)).toEqual({
+      lastToolResultText: toolResult,
+      lastToolResultId: assignmentId,
+      userPhotoIds: [photoA, photoB],
+    });
+  });
+
+  it("turns a step with placeholders into a response factory", async () => {
+    const step = {
+      toolCalls: [
+        {
+          name: "submit_check_in",
+          arguments: {
+            assignment_id: FAUX_PLACEHOLDER.lastToolResultId,
+            photo_ids: FAUX_PLACEHOLDER.userPhotoIds,
+          },
+        },
+      ],
+    };
+    const factory = toFauxStep(step);
+    expect(typeof factory).toBe("function");
+
+    const message = await (factory as FauxResponseFactory)(
+      { messages } as TranscriptContext,
+      undefined,
+      { callCount: 0, deferredFetchCount: 0, cancelledDeferred: [] },
+      {} as never,
+    );
+    expect(message.stopReason).toBe("toolUse");
+    expect(message.content[0]).toMatchObject({
+      type: "toolCall",
+      name: "submit_check_in",
+      arguments: { assignment_id: assignmentId, photo_ids: [photoA, photoB] },
+    });
+  });
+
+  it("puts the real tool result into the answer text", async () => {
+    const factory = toFauxStep(FAUX_PLACEHOLDER.lastToolResultText);
+    const message = await (factory as FauxResponseFactory)(
+      { messages } as TranscriptContext,
+      undefined,
+      { callCount: 0, deferredFetchCount: 0, cancelledDeferred: [] },
+      {} as never,
+    );
+    expect(message.content).toEqual([{ type: "text", text: toolResult }]);
+  });
+
+  it("leaves a step without placeholders a plain message", () => {
+    expect(typeof toFauxStep("готово")).toBe("object");
   });
 });
 

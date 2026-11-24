@@ -36,6 +36,23 @@
  * `repeatLast` appends the last step of a slot that many more times — the chat queue of a scripted
  * e2e run is otherwise exhausted after a handful of messages.
  *
+ * ## Placeholders (`scripts/fixtures/faux-m2.json`)
+ *
+ * A JSON script cannot know the ids a run creates, so a step may reference three exact tokens
+ * (inside `text` or as a whole tool-call argument value; objects and arrays are walked):
+ *
+ * - `"$lastToolResultText"` — the text of the previous `toolResult` message. Whole-token `text`
+ *   becomes that text verbatim, and an inline occurrence is replaced in place. It is what makes an
+ *   e2e answer carry the **real** tool output (list, verdict, approval) instead of a canned line.
+ * - `"$lastToolResultId"` — the first uuid in the previous tool result. `list_assignments` puts
+ *   `id: <assignment-id>` at the end of each row and `get_verdicts` does the same for the verdict,
+ *   so a follow-up call can target the object the agent just read.
+ * - `"$userPhotoIds"` — the ids of the photos the HTTP layer appended to the last user message
+ *   (`[к сообщению прикреплены фото: …]`). An exact value expands to the **array** of ids, which is
+ *   what `submit_check_in.photo_ids` expects.
+ *
+ * A step without a token is a plain message; a step with one becomes a response factory.
+ *
  * Nothing here is production code: the models do not exist outside a faux `Models` collection, and
  * boot only takes this path when the env flag says so. `models.json` still validates against the
  * real provider list, so the faux slots are built here and injected, never read from the file.
@@ -48,8 +65,11 @@ import {
   fauxProvider,
   fauxText,
   fauxToolCall,
+  type AssistantMessage,
   type FauxProviderHandle,
+  type FauxResponseFactory,
   type FauxResponseStep,
+  type Message,
   type Models,
 } from "@earendil-works/pi-ai";
 import type { JsonObject } from "@earendil-works/pi-durable";
@@ -106,8 +126,39 @@ export const FauxScriptSchema = z.object({
 export type FauxScript = z.infer<typeof FauxScriptSchema>;
 export type FauxStep = z.infer<typeof FauxStepSchema>;
 
+/**
+ * Tokens a script step may use to reach values only the running conversation knows.
+ * See the module comment for the semantics; all three are exact matches.
+ */
+export const FAUX_PLACEHOLDER = {
+  lastToolResultText: "$lastToolResultText",
+  lastToolResultId: "$lastToolResultId",
+  userPhotoIds: "$userPhotoIds",
+} as const;
+
+const PLACEHOLDER_TOKENS: readonly string[] = Object.values(FAUX_PLACEHOLDER);
+const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+/** The block `src/server/images.ts` appends to the user text; the ids are comma-separated. */
+const PHOTO_BLOCK_PATTERN = /прикреплены фото:\s*([^\n]+?)(?:\s+—|$)/;
+
+/** Values a step's placeholders resolve to, read from the model's transcript. */
+export interface FauxPlaceholderContext {
+  readonly lastToolResultText: string;
+  readonly lastToolResultId: string | null;
+  readonly userPhotoIds: readonly string[];
+}
+
 /** One script step → the provider's queue entry. */
 export function toFauxStep(step: FauxStep): FauxResponseStep {
+  if (!hasPlaceholder(step)) return staticStep(step);
+
+  const factory: FauxResponseFactory = (context) =>
+    staticStep(resolveStep(step, placeholderContext(context.messages)));
+  return factory;
+}
+
+/** The plain message a step describes, with no placeholders left. */
+function staticStep(step: FauxStep): AssistantMessage {
   if (typeof step === "string") return fauxAssistantMessage(step);
 
   const blocks = [
@@ -116,6 +167,90 @@ export function toFauxStep(step: FauxStep): FauxResponseStep {
   ];
   const stopReason = step.stopReason ?? (step.toolCalls === undefined ? "stop" : "toolUse");
   return fauxAssistantMessage(blocks.length === 0 ? "" : blocks, { stopReason });
+}
+
+function hasPlaceholder(step: FauxStep): boolean {
+  const serialized = JSON.stringify(step);
+  return PLACEHOLDER_TOKENS.some((token) => serialized.includes(token));
+}
+
+/** Everything the placeholders need, from the transcript of the model call being answered. */
+export function placeholderContext(messages: readonly Message[]): FauxPlaceholderContext {
+  const lastUserText = lastMessageText(messages, "user");
+  const lastToolResultText = lastMessageText(messages, "toolResult");
+  const photoBlock = PHOTO_BLOCK_PATTERN.exec(lastUserText)?.[1] ?? "";
+  return {
+    lastToolResultText,
+    lastToolResultId: UUID_PATTERN.exec(lastToolResultText)?.[0] ?? null,
+    userPhotoIds: photoBlock
+      .split(",")
+      .map((id) => id.trim())
+      .filter((id) => id !== ""),
+  };
+}
+
+/** Replace placeholders in one step; arguments are walked, text is substituted in place. */
+export function resolveStep(step: FauxStep, context: FauxPlaceholderContext): FauxStep {
+  if (typeof step === "string") return resolveText(step, context);
+  return {
+    ...(step.text === undefined ? {} : { text: resolveText(step.text, context) }),
+    ...(step.toolCalls === undefined
+      ? {}
+      : {
+          toolCalls: step.toolCalls.map((call) => ({
+            ...call,
+            ...(call.arguments === undefined
+              ? {}
+              : { arguments: resolveArguments(call.arguments, context) }),
+          })),
+        }),
+    ...(step.stopReason === undefined ? {} : { stopReason: step.stopReason }),
+  };
+}
+
+function resolveText(text: string, context: FauxPlaceholderContext): string {
+  return text.split(FAUX_PLACEHOLDER.lastToolResultText).join(context.lastToolResultText);
+}
+
+function resolveArguments(
+  value: Record<string, unknown>,
+  context: FauxPlaceholderContext,
+): Record<string, unknown> {
+  const resolved: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) resolved[key] = resolveValue(item, context);
+  return resolved;
+}
+
+function resolveValue(value: unknown, context: FauxPlaceholderContext): unknown {
+  if (typeof value === "string") {
+    if (value === FAUX_PLACEHOLDER.lastToolResultText) return context.lastToolResultText;
+    if (value === FAUX_PLACEHOLDER.lastToolResultId) return context.lastToolResultId ?? value;
+    if (value === FAUX_PLACEHOLDER.userPhotoIds) return [...context.userPhotoIds];
+    return resolveText(value, context);
+  }
+  if (Array.isArray(value)) return value.map((item) => resolveValue(item, context));
+  if (value !== null && typeof value === "object") {
+    const nested: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) nested[key] = resolveValue(item, context);
+    return nested;
+  }
+  return value;
+}
+
+/** Text of the last message with `role`, including text blocks inside array content. */
+function lastMessageText(messages: readonly Message[], role: Message["role"]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message === undefined || message.role !== role) continue;
+    const content = message.content;
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    return content
+      .filter((block): block is { type: "text"; text: string } => block !== null && typeof block === "object" && block.type === "text")
+      .map((block) => block.text)
+      .join("\n");
+  }
+  return "";
 }
 
 /** Parse + validate a script; throws with the file path on invalid JSON or an invalid shape. */
