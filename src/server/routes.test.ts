@@ -261,7 +261,7 @@ describe("durable idempotency key (K4)", () => {
 describe("photos attached to a chat message (SPEC §5.4)", () => {
   const PNG_URL = `data:image/png;base64,${Buffer.from(PNG_BYTES).toString("base64")}`;
 
-  function setupWithPhotos(): {
+  function setupWithPhotos(key: string = keys.childKey): {
     core: FakeCore;
     saved: { kind: string; mime?: string }[];
     request: (body: unknown) => Promise<Response>;
@@ -288,7 +288,7 @@ describe("photos attached to a chat message (SPEC §5.4)", () => {
         Promise.resolve(
           app.request("/v1/chat/completions", {
             method: "POST",
-            headers: { "content-type": "application/json", authorization: `Bearer ${keys.childKey}` },
+            headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
             body: JSON.stringify(body),
           }),
         ),
@@ -314,6 +314,27 @@ describe("photos attached to a chat message (SPEC §5.4)", () => {
     expect(saved).toEqual([{ kind: "checkin", mime: "image/png" }]);
     expect(String(core.echoes[0]?.input)).toContain("photo-1");
     expect(String(core.echoes[0]?.input)).toContain("submit_check_in");
+  });
+
+  it("a parent's screenshot is stored as intake material and pointed at parse_screenshot (P1)", async () => {
+    const { core, saved, request } = setupWithPhotos(keys.parentKey);
+    const res = await request({
+      model: "hmwrk",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "вот скриншот дневника" },
+            { type: "image_url", image_url: { url: PNG_URL } },
+          ],
+        },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    expect(saved).toEqual([{ kind: "screenshot", mime: "image/png" }]);
+    expect(String(core.echoes[0]?.input)).toContain("parse_screenshot");
+    expect(String(core.echoes[0]?.input)).not.toContain("submit_check_in");
   });
 
   it("still answers when the image part is broken", async () => {

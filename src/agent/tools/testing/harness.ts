@@ -11,6 +11,10 @@
  * - {@link ToolHarness.call}, which invokes a tool the way the Harness does: raw arguments plus
  *   `api.conversationId` — the role never travels in the arguments.
  *
+ * P1 adds the intake half of `parse_screenshot`: pass `visionAnswer` (a scripted read-model answer)
+ * or `readImages` (a real client over a faux provider) to enable the seam, then
+ * {@link ToolHarness.seedScreenshot} to create the photo row and its bytes.
+ *
  * Not named `*.test.ts` on purpose: it is support code, imported by several test files.
  */
 
@@ -27,12 +31,15 @@ import type {
   AssignmentWithItems,
   CheckIn,
   FindingVerdict,
+  Photo,
   Repos,
   Settings,
   ToolName,
   VerificationWithFindings,
 } from "../../../domain/index.js";
+import type { ReadImagesInput, ReadImagesResult } from "../../../llm/index.js";
 import { createHmwrkTools } from "../index.js";
+import type { ScreenshotIntake } from "../screenshot-draft.js";
 
 /** K3 conversations: parent, child, and one nobody mapped (the least-privilege path). */
 export const PARENT_CONVERSATION = 1 as ConversationId;
@@ -63,6 +70,14 @@ export interface ToolHarnessOptions {
   readonly settings?: Partial<Settings>;
   /** Replace the verify start — e.g. to make it throw. Called after the id is recorded. */
   readonly startVerify?: VerifySpawner["startVerify"];
+  /**
+   * One scripted vision answer for `parse_screenshot` (P1). Enables the intake seam with a fake
+   * read client; a function receives the prompt/photos and may answer differently per call (the
+   * corrective-retry cases do exactly that).
+   */
+  readonly visionAnswer?: string | ((input: ReadImagesInput) => string | Promise<string>);
+  /** A real read client (e.g. `createLlmClients` over a faux provider); wins over `visionAnswer`. */
+  readonly readImages?: ScreenshotIntake["readImages"];
 }
 
 export interface ToolHarness {
@@ -70,11 +85,18 @@ export interface ToolHarness {
   readonly tools: AgentToolset;
   /** `checkInId`s the tools asked to verify, in call order. */
   readonly verifyCalls: readonly { checkInId: string }[];
+  /** Every `readImages` input of `parse_screenshot`, in call order. */
+  readonly readCalls: readonly ReadImagesInput[];
   now(): Date;
   setNow(value: Date): void;
+  /** Create a `screenshot` photo row and register its bytes for the intake seam. */
+  seedScreenshot(bytes?: Uint8Array): Promise<Photo>;
   /** Invoke a tool exactly as `execute(args, api, context)` does. */
   call(name: ToolName, conversation: ConversationId, args: unknown): Promise<ToolExecutionResult>;
 }
+
+/** Bytes the fake store answers with when a screenshot was seeded without explicit ones. */
+const FAKE_SCREENSHOT_BYTES = new Uint8Array([0xff, 0xd8, 0xff, 0xdb]);
 
 export function createToolHarness(options: ToolHarnessOptions = {}): ToolHarness {
   let instant = options.now ?? NOW;
@@ -92,15 +114,44 @@ export function createToolHarness(options: ToolHarnessOptions = {}): ToolHarness
   };
 
   const deps: ToolDeps = { repos, spawnVerify, now };
-  const tools = createHmwrkTools(deps, actors);
+
+  const readCalls: ReadImagesInput[] = [];
+  const photoBytes = new Map<string, Uint8Array>();
+  const visionAnswer = options.visionAnswer;
+  const intake: ScreenshotIntake | undefined =
+    options.readImages === undefined && visionAnswer === undefined
+      ? undefined
+      : {
+          readImages: async (input): Promise<ReadImagesResult> => {
+            readCalls.push(input);
+            if (options.readImages !== undefined) return options.readImages(input);
+            const text = typeof visionAnswer === "function" ? await visionAnswer(input) : (visionAnswer ?? "");
+            return { text, model: "faux-read" };
+          },
+          photoFiles: {
+            async read(photo) {
+              const bytes = photoBytes.get(photo.id);
+              if (bytes === undefined) throw new Error(`photo file ${photo.path} is missing on disk`);
+              return bytes;
+            },
+          },
+        };
+
+  const tools = createHmwrkTools(deps, actors, intake === undefined ? {} : { intake });
 
   return {
     repos,
     tools,
     verifyCalls,
+    readCalls,
     now,
     setNow(value) {
       instant = value;
+    },
+    async seedScreenshot(bytes = FAKE_SCREENSHOT_BYTES) {
+      const photo = await repos.photos.create({ kind: "screenshot", path: `${Math.random().toString(16).slice(2)}.jpg`, mime: "image/jpeg" });
+      photoBytes.set(photo.id, bytes);
+      return photo;
     },
     async call(name, conversation, args) {
       const tool = tools[name];

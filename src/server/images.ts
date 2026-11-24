@@ -19,7 +19,19 @@
 
 import type { ChatContent, ChatMessage } from "../contracts/openai.js";
 import { PHOTO_FORMATS, PHOTO_MAX_BYTES, detectPhotoFormat } from "../store/photo-files.js";
-import type { PhotoKind } from "../domain/index.js";
+import type { PhotoKind, Role } from "../domain/index.js";
+
+/**
+ * SPEC §5.3 / §5.4: whose picture is it?
+ *
+ * A parent attaches a screenshot of the diary for intake (`screenshot`), a child attaches a photo
+ * of the notebook for a check-in (`checkin`). The two kinds share `data/photos` and differ only in
+ * `photos.kind`, so the vision flow can tell intake material from grading material without a
+ * second directory.
+ */
+export function photoKindForRole(role: Role): PhotoKind {
+  return role === "parent" ? "screenshot" : "checkin";
+}
 
 /** One decoded, validated image, ready for the photo store. */
 export interface DecodedPhoto {
@@ -103,7 +115,13 @@ export interface PhotoSink {
 
 export interface AttachPhotosOptions {
   readonly sink: PhotoSink;
+  /** Explicit kind; wins over {@link role}. */
   readonly kind?: PhotoKind;
+  /**
+   * Who sent the message. When neither `kind` nor `role` is given the historical default
+   * (`checkin`) is used, so old callers keep their behaviour.
+   */
+  readonly role?: Role;
   readonly maxBytes?: number;
 }
 
@@ -129,11 +147,12 @@ export async function attachMessagePhotos(
   });
   const problems: string[] = [...decoded.problems];
   const ids: string[] = [];
+  const kind = options.kind ?? (options.role === undefined ? "checkin" : photoKindForRole(options.role));
 
   for (const [index, photo] of decoded.photos.entries()) {
     try {
       const saved = await options.sink.save({
-        kind: options.kind ?? "checkin",
+        kind,
         bytes: photo.bytes,
         mime: photo.mime,
       });
@@ -153,9 +172,12 @@ export async function attachMessagePhotos(
  * [к сообщению прикреплены фото: 9f1c…, 4b2e… — передай их в submit_check_in как photo_ids]
  * ```
  *
+ * The tool named in the hint follows the author's role (SPEC §5.3): a parent's pictures are intake
+ * screenshots for `parse_screenshot`, a child's pictures are notebook photos for `submit_check_in`.
  * Empty string when no photo was stored (the message is submitted unchanged).
  */
-export function photoAttachmentBlock(ids: readonly string[]): string {
+export function photoAttachmentBlock(ids: readonly string[], role: Role = "child"): string {
   if (ids.length === 0) return "";
-  return `[к сообщению прикреплены фото: ${ids.join(", ")} — передай их в submit_check_in как photo_ids]`;
+  const tool = role === "parent" ? "parse_screenshot" : "submit_check_in";
+  return `[к сообщению прикреплены фото: ${ids.join(", ")} — передай их в ${tool} как photo_ids]`;
 }

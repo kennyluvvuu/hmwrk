@@ -103,27 +103,30 @@ describe("list_assignments", () => {
   });
 });
 
-describe("parse_screenshot (заглушка M1)", () => {
-  it("говорит про веху 3 и повторяет, что получил, не выдумывая задания", async () => {
+/**
+ * Since P1 the real implementation lives in `screenshot.test.ts`; this is only the seam case: a
+ * toolset built without the vision client must still answer honestly instead of inventing a draft.
+ */
+describe("parse_screenshot (шов без vision-клиента)", () => {
+  it("сообщает, что разбор не подключён, и не создаёт заданий", async () => {
     const harness = createToolHarness();
+    const photo = await harness.repos.photos.create({ kind: "screenshot", path: "s.jpg", mime: "image/jpeg" });
     const result = await harness.call("parse_screenshot", PARENT_CONVERSATION, {
-      photo_ids: ["11111111-1111-4111-8111-111111111111"],
+      photo_ids: [photo.id],
       hint: "дневник, математика №12",
     });
     const text = resultText(result);
     expect(result.isError).toBeUndefined();
-    expect(text).toContain("веха 3");
-    expect(text).toContain("11111111-1111-4111-8111-111111111111");
-    expect(text).toContain("дневник, математика №12");
+    expect(text).toContain("не подключён");
     expect(text).toContain("manual_add_assignment");
     expect(harness.repos.raw.assignments).toHaveLength(0);
   });
 
-  it("работает и по одной текстовой подсказке", async () => {
+  it("одна текстовая подсказка без фото — путь в ручное добавление", async () => {
     const harness = createToolHarness();
     const text = resultText(await harness.call("parse_screenshot", PARENT_CONVERSATION, { hint: "чтение, стр. 12" }));
     expect(text).toContain("чтение, стр. 12");
-    expect(text).toContain("ещё не подключён");
+    expect(text).toContain("manual_add_assignment");
   });
 });
 

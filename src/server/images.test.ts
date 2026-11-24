@@ -12,6 +12,7 @@ import {
   decodeMessagePhotos,
   lastUserContent,
   photoAttachmentBlock,
+  photoKindForRole,
   type PhotoSink,
 } from "./images.js";
 
@@ -102,6 +103,26 @@ describe("attachMessagePhotos", () => {
     ]);
   });
 
+  it("a parent's screenshot is stored as kind «screenshot» (SPEC §5.3)", async () => {
+    const sink = fakeSink();
+    await attachMessagePhotos([{ type: "image_url", image_url: { url: PNG_URL } }], { sink, role: "parent" });
+    expect(sink.saved).toEqual([{ kind: "screenshot", mime: "image/png", size: PNG_BYTES.byteLength }]);
+  });
+
+  it("a child's photo stays a check-in photo, and an explicit kind wins over the role", async () => {
+    const childSink = fakeSink();
+    await attachMessagePhotos([{ type: "image_url", image_url: { url: PNG_URL } }], { sink: childSink, role: "child" });
+    expect(childSink.saved[0]?.kind).toBe("checkin");
+
+    const explicit = fakeSink();
+    await attachMessagePhotos([{ type: "image_url", image_url: { url: PNG_URL } }], {
+      sink: explicit,
+      role: "parent",
+      kind: "checkin",
+    });
+    expect(explicit.saved[0]?.kind).toBe("checkin");
+  });
+
   it("keeps the message when the store fails on one photo", async () => {
     let calls = 0;
     const sink: PhotoSink = {
@@ -138,5 +159,18 @@ describe("lastUserContent and the prompt block", () => {
     expect(photoAttachmentBlock([])).toBe("");
     expect(photoAttachmentBlock(["p1", "p2"])).toContain("p1, p2");
     expect(photoAttachmentBlock(["p1"])).toContain("photo_ids");
+    expect(photoAttachmentBlock(["p1"])).toContain("submit_check_in");
+  });
+
+  it("points a parent at parse_screenshot (intake), a child at submit_check_in", () => {
+    expect(photoAttachmentBlock(["p1"], "parent")).toContain("parse_screenshot");
+    expect(photoAttachmentBlock(["p1"], "child")).toContain("submit_check_in");
+  });
+});
+
+describe("photoKindForRole", () => {
+  it("parent → screenshot, child → checkin", () => {
+    expect(photoKindForRole("parent")).toBe("screenshot");
+    expect(photoKindForRole("child")).toBe("checkin");
   });
 });
