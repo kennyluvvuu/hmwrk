@@ -78,15 +78,14 @@ export function resolveCapabilities(deps: AgentDeps): AgentCapabilities {
 }
 
 /**
- * The section key actually installed, and the reason it is not `AGENT_SECTION_KEY` verbatim.
+ * The section key actually installed.
  *
  * `createRegistry().install()` validates keys against `/^[a-z][a-z0-9_-]*$/` — **no dots**
  * (`dist/harness/registry.js`, `validateExtension`), and `AGENT_SECTION_KEY` in
- * `src/contracts/agent.ts` is `"hmwrk.role-and-date"`. Deriving the installed key keeps one
- * source of truth: whatever T3's contract says, the registry gets a valid key. M2's
- * `wrapSection()` must target this value, which is why it is exported from `src/agent`.
- * Reported to the orchestrator (contracts are not A1's to edit): one-line fix in
- * `src/contracts/agent.ts` would make this identity.
+ * `src/contracts/agent.ts` is already `"hmwrk-role-and-date"` (W3 fix), so this is an identity
+ * today; the derivation stays as the single normalisation point, so a future dotted key cannot
+ * break boot. M2's `wrapSection()` must target this value, which is why it is exported from
+ * `src/agent`.
  */
 export const AGENT_SECTION_KEY_INSTALLED: string = AGENT_SECTION_KEY.replaceAll(".", "-");
 

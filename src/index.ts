@@ -6,8 +6,10 @@
  */
 import { mkdirSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { buildAgentExtensions } from "./agent/index.js";
 import { ConfigError, createLogger, loadConfig, type Config, type Logger } from "./config/index.js";
 import { openHarness, type Core } from "./contracts/harness.js";
+import { installExtensions } from "./durable/index.js";
 import type { UserDirectory } from "./contracts/roles.js";
 import { createRoleResolver } from "./server/auth.js";
 import { serve } from "./server/node-server.js";
@@ -49,6 +51,15 @@ export async function bootstrap(options: BootstrapOptions): Promise<RunningServe
   const core = await options.openCore(config);
   await core.resume();
 
+  // A1's empty agent: the `hmwrk` extension (role/date prompt section, no tools in M1).
+  // Installed after `openHarness` because its prompt section reads the actor directory
+  // that only an open core provides (K1/K7); M2 passes its tools through the same factory.
+  const extensions = buildAgentExtensions({
+    deps: { actors: core.actors, models: config.models },
+  });
+  installExtensions(core, extensions);
+  logger.info("agent extension installed", { extensions: extensions.map((extension) => extension.name) });
+
   const resolver = createRoleResolver({
     keys: config.roles,
     ...(options.users === undefined ? {} : { users: options.users }),
@@ -83,7 +94,7 @@ async function main(): Promise<void> {
   const running = await bootstrap({
     config,
     logger,
-    // S1 implements `openHarness`; until it lands, boot fails loudly instead of serving nothing.
+    // S1's facade (src/durable); a failed open aborts boot instead of serving nothing.
     openCore: (loaded) => openHarness(loaded),
   });
 
