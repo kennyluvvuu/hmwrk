@@ -21,7 +21,7 @@
  */
 
 import type { Context } from "@earendil-works/chord/context";
-import type { StopReason, Usage } from "@earendil-works/pi-ai";
+import type { Models, StopReason, Usage } from "@earendil-works/pi-ai";
 import type { ClientAttribution, ClientIdentity } from "@earendil-works/pi-ai/utils/identity";
 import type {
   Conversation,
@@ -38,7 +38,7 @@ import type {
   UserInput,
 } from "@earendil-works/pi-durable";
 import type { SqliteDatabase, SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
-import type { ModelsConfig } from "../config/index.js";
+import type { Logger, ModelsConfig } from "../config/index.js";
 import type { Role } from "../domain/index.js";
 
 // ---------------------------------------------------------------------------
@@ -130,6 +130,13 @@ export interface OpenHarnessOptions {
   readonly now?: () => number;
   /** K9: timer source. Only tests (fake clock) should pass it. */
   readonly setTimer?: SetTimer;
+  /**
+   * Test seam (S1): an already built `Models` collection, e.g. one holding the pi-ai faux provider (K6/R1).
+   * Production passes nothing and gets the groq/mistral catalogue of {@link openHarness} (K8).
+   */
+  readonly models?: Models;
+  /** T2 logger for the facade's own diagnostics (missing model slots, reports). Default: a `durable` child. */
+  readonly logger?: Logger;
   /** Invocation context for `Harness.open`; default `BACKGROUND_CONTEXT` (K1). */
   readonly context?: Context;
   /** K2: SQLite busy timeout in ms; the adapter default is 5000. */
@@ -144,7 +151,12 @@ export interface OpenHarnessOptions {
  * `readOnly` is intentionally not exposed (K11).
  */
 export async function openHarness(cfg: HarnessConfig, options?: OpenHarnessOptions): Promise<Core> {
-  throw new Error("Not implemented: contract only");
+  // S1's implementation lives in `src/durable/harness.ts`, the only module allowed to call pi-durable
+  // (ADR 0002 risk #1). It is loaded lazily for two reasons: this contract module stays importable without
+  // pi-durable/storage for S2 and A1, and the durable module can import the fixed values above without a
+  // module cycle.
+  const { openHarnessCore } = await import("../durable/harness.js");
+  return openHarnessCore(cfg, options);
 }
 
 /** The open core: the only object the server, the agent and durable tasks hold. */
