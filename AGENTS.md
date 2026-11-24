@@ -21,7 +21,7 @@ bash scripts/verify-m3.sh                     # e2e расписаний+Telegra
 
 Тесты — vitest, лежат рядом с кодом (`*.test.ts`); HTTP тестируется через `app.request()` Hono (без listen).
 
-## Памятка по песочнице (учится на的血 слезах, см. orchestrator.md §7)
+## Памятка по песочнице (выстрадано на реальных падениях, см. orchestrator.md §7)
 
 - Скратч — только `$TMPDIR` (не `/tmp`, не `../`): иначе permission-gate затыкает тебя и оркестратора.
 - Не делать `cd node_modules/… && grep ../…` — питается как «вне проекта». Читай файлы напрямую: `node_modules/@earendil-works/…`, grep с путём от корня ворктри.
