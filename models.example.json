@@ -1,0 +1,15 @@
+{
+  "$comment": "Model slots (SPEC 7). PLACEHOLDER model ids: research R1 and milestone M2 pick the real Groq vision / Mistral DeepSeek ids. Copy this file to DATA_DIR/models.json (or point MODELS_CONFIG at an absolute path) and replace every modelId. read = screenshot/notebook photos, verify = solve and check, chat = agent dialogue.",
+  "read": {
+    "provider": "groq",
+    "modelId": "replace-with-groq-vision-model-id"
+  },
+  "verify": {
+    "provider": "mistral",
+    "modelId": "replace-with-mistral-deepseek-model-id"
+  },
+  "chat": {
+    "provider": "mistral",
+    "modelId": "replace-with-mistral-deepseek-model-id"
+  }
+}
