@@ -85,10 +85,10 @@ describe("contracts: shapes", () => {
     expect(() => finishReasonFromTurn({ status: "done", stopReason: "stop" })).toThrow(/Not implemented/);
     expect(() => toToolParameters({} as never)).toThrow(/Not implemented/);
     expect(() => createRoleResolver({ keys: { parentKey: "p", childKey: "c" } })).toThrow(/Not implemented/);
-    await expect(openHarness({ dbPath: ":memory:", dataDir: ".", models: {
-      read: { provider: "groq", modelId: "qwen/qwen3.8-27b" },
-      verify: { provider: "mistral", modelId: "deepseek-v4-1-flash-1017" },
-      chat: { provider: "mistral", modelId: "deepseek-v4-1-flash-1017" },
-    } })).rejects.toThrow(/Not implemented/);
+  });
+
+  it("openHarness is implemented by S1 (src/durable) and delegates lazily", () => {
+    expect(openHarness).toBeTypeOf("function");
+    expect(openHarness.constructor.name).toBe("AsyncFunction");
   });
 });
